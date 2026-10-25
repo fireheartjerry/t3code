@@ -194,6 +194,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
   options, and pass combinators as additional function-builder arguments.
 - Inferred types over annotations. `any` is the enemy.
 - Default to no comment. Write one only for a constraint, an external quirk, or an invariant the code can't show, in one line where you can and four at most. Don't restate names or signatures, narrate steps, record history, or explain the fix you just made; the PR carries that. `t3code/no-low-value-comments` enforces the length cap and the mechanical cases.
+- React effects are a last resort: derive in render, act in handlers, reset with `key`, or use a ref callback or store. `scripts/effect-budget.json` fails CI when a file gains `useEffect`/`useLayoutEffect`/`useInsertionEffect` calls; raise an entry only in the PR that needs it, with a reason the reviewer can see.
 - Our users drive agents all day and notice a dropped frame, a lying spinner, and a stale label. No continuously repainting animations; they peg the GPU on high-refresh displays.
 - If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
 

@@ -1,7 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off
 // Runs CI's fast checks for this branch's changes: format and lint of the
-// changed files, knip, generated GraphQL operations, typecheck of the affected
-// packages and their dependents, and the test files beside the changed files.
+// changed files, knip, the React effect budget, generated GraphQL operations,
+// typecheck of the affected packages and their dependents, and the test files
+// beside the changed files.
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
 //
@@ -222,6 +223,13 @@ const graphql = ["apps/server", "packages/source-control-github"].filter((dir) =
   files.some((file) => file.startsWith(`${dir}/`)),
 );
 
+// The effect budget reads only source files and its JSON, in about a second.
+const runEffectBudget = files.some(
+  (file) =>
+    (CODE.test(file) && (file.startsWith("apps/") || file.startsWith("packages/"))) ||
+    file.startsWith("scripts/effect-budget."),
+);
+
 const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
 const steps = [
   // Runs first; it takes about a second.
@@ -232,6 +240,7 @@ const steps = [
   },
   code.length > 0 && { name: "lint", args: ["lint", ...code] },
   ...(runKnip ? knipPasses : []),
+  runEffectBudget && { name: "effect budget", args: ["run", "effect-budget:check"] },
   ...graphql.map((dir) => ({
     name: `graphql (${dir})`,
     args: ["run", "--filter", `./${dir}`, "generate", "--check"],
