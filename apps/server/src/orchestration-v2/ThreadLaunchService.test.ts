@@ -345,9 +345,11 @@ it.effect.each(["root", "existing_worktree", "worktree"] as const)(
       }>();
       const harness = makeHarness({
         setupUnstartedCompleted: (input) =>
-          Deferred.succeed(completed, { ...input, state: "unstarted" }).pipe(Effect.asVoid),
+          Deferred.succeed(completed, { ...input, state: "unstarted" as const }).pipe(
+            Effect.asVoid,
+          ),
         setupUncertain: (input) =>
-          Deferred.succeed(completed, { ...input, state: "unknown" }).pipe(Effect.asVoid),
+          Deferred.succeed(completed, { ...input, state: "unknown" as const }).pipe(Effect.asVoid),
       });
       yield* Effect.gen(function* () {
         const launches = yield* ThreadLaunch.ThreadLaunchService;

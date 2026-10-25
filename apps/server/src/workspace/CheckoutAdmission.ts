@@ -111,6 +111,8 @@ export class CheckoutAdmission extends Context.Reference<{
     readonly threadId: string;
     readonly terminalId: string;
     readonly confirmed: boolean;
+    /** Separate proof for every descendant; a root PTY exit alone is insufficient. */
+    readonly descendantsStopped?: boolean;
   }) => Effect.Effect<void>;
   readonly terminalStarted: (input: {
     readonly threadId: string;
