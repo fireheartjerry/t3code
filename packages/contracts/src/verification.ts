@@ -13,9 +13,7 @@ import {
 } from "./baseSchemas.ts";
 import { CheckoutIdentity, OwnershipHandle } from "./checkoutOwnership.ts";
 
-export const VERIFICATION_DEFAULT_TIMEOUT_MS = 900_000;
-export const VERIFICATION_MAX_FILES = 100_000;
-export const VERIFICATION_MAX_BYTES = 2_147_483_648;
+const VERIFICATION_DEFAULT_TIMEOUT_MS = 900_000;
 export const VERIFICATION_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export const VerificationInputPattern = Schema.String.check(Schema.isMinLength(1)).check(
