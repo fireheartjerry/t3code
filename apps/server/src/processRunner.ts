@@ -17,6 +17,7 @@ import {
 } from "@t3tools/provider-core/server/collectStreamText";
 
 export interface ProcessRunInput {
+  readonly onSpawn?: ((pid: number) => Effect.Effect<void, ProcessRunError>) | undefined;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string | undefined;
@@ -313,6 +314,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
     );
 
   const stdin = input.stdin;
+  if (input.onSpawn !== undefined) yield* input.onSpawn(Number(child.pid));
   const onStdoutChunk = input.onStdoutChunk;
   const writeStdin =
     stdin === undefined
