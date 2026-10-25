@@ -31,6 +31,12 @@ import { forkParked } from "../serverActivation.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("verification.execute"),
+    verificationId: Schema.String,
+    executionClaimId: Schema.String,
+  }),
+  Schema.Struct({ type: Schema.Literal("checkout-wait.resume"), waitId: Schema.String }),
+  Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
   }),
@@ -123,6 +129,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "verification.execute",
+  "checkout-wait.resume",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",

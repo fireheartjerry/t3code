@@ -26,6 +26,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -130,6 +131,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const checkoutAdmission = yield* CheckoutAdmission.CheckoutAdmission;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     // Build draining callbacks outside startup scope so they cannot retain full thread history.
@@ -313,6 +315,14 @@ export const layer: Layer.Layer<
           cause: `Run ${runId} is missing its execution projection state.`,
         });
       }
+      const ownershipHandle = yield* checkoutAdmission.admit({
+        commandId: CommandId.make(`${run.id}:ownership:provider`),
+        projectId: projection.thread.projectId,
+        threadId: projection.thread.id,
+        runId: run.id,
+        cwd: checkpointScope.cwd,
+        operation: "provider",
+      });
       const settleRunBeforeStart = Effect.fn("orchestrationV2.providerTurnStart.settleBeforeStart")(
         function* (input: {
           readonly signal: string;
@@ -1288,56 +1298,58 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
-      return runExecution.startRootRun({
-        commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
-        appThread: projection.thread,
-        providerSessionId,
-        session: deliverySession,
-        run: runningRun,
-        rootNode: runningRootNode,
-        checkpointScope,
-        providerThread: runningProviderThread,
-        attempt: runningAttempt,
-        attemptId: attempt.id,
-        loadInheritedBackgroundTurnItems: runControls.loadInheritedBackgroundTurnItems,
-        relatedThreadIds: routableSubagents.flatMap((subagent) =>
-          subagent.childThreadId === null ? [] : [subagent.childThreadId],
-        ),
-        relatedProviderThreadIds: routableSubagents.flatMap((subagent) =>
-          subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
-        ),
-        providerTurnOrdinal:
-          Math.max(
-            0,
-            ...projection.providerTurns
-              .filter((turn) => turn.providerThreadId === providerThread.id)
-              .map((turn) => turn.ordinal),
-          ) + 1,
-        nativeThreadHasTurns:
-          nativeInputRunIds.size > 0 ||
-          (legacyInputRunIds.size > 0 &&
-            sameNativeThread &&
-            !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
-        shouldStartProviderTurn: runControls.shouldStartProviderTurn,
-        shouldFinalizeRun: runControls.shouldFinalizeRun,
-        hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
-        loadRunInterruptReason: runControls.loadRunInterruptReason,
-        message: {
-          messageId: message.id,
-          text: userText,
-          attachments: message.attachments,
-          createdBy: message.createdBy,
-          creationSource: message.creationSource,
-          ...(message.scheduledTaskId === undefined
-            ? {}
-            : { scheduledTaskId: message.scheduledTaskId }),
-          ...(message.senderThreadId === undefined
-            ? {}
-            : { senderThreadId: message.senderThreadId }),
-        },
-        modelSelection: run.modelSelection,
-        runtimePolicy: resolvedRuntimePolicy,
-      });
+      return runExecution
+        .startRootRun({
+          commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
+          appThread: projection.thread,
+          providerSessionId,
+          session: deliverySession,
+          run: runningRun,
+          rootNode: runningRootNode,
+          checkpointScope,
+          providerThread: runningProviderThread,
+          attempt: runningAttempt,
+          attemptId: attempt.id,
+          loadInheritedBackgroundTurnItems: runControls.loadInheritedBackgroundTurnItems,
+          relatedThreadIds: routableSubagents.flatMap((subagent) =>
+            subagent.childThreadId === null ? [] : [subagent.childThreadId],
+          ),
+          relatedProviderThreadIds: routableSubagents.flatMap((subagent) =>
+            subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
+          ),
+          providerTurnOrdinal:
+            Math.max(
+              0,
+              ...projection.providerTurns
+                .filter((turn) => turn.providerThreadId === providerThread.id)
+                .map((turn) => turn.ordinal),
+            ) + 1,
+          nativeThreadHasTurns:
+            nativeInputRunIds.size > 0 ||
+            (legacyInputRunIds.size > 0 &&
+              sameNativeThread &&
+              !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
+          shouldStartProviderTurn: runControls.shouldStartProviderTurn,
+          shouldFinalizeRun: runControls.shouldFinalizeRun,
+          hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+          loadRunInterruptReason: runControls.loadRunInterruptReason,
+          message: {
+            messageId: message.id,
+            text: userText,
+            attachments: message.attachments,
+            createdBy: message.createdBy,
+            creationSource: message.creationSource,
+            ...(message.scheduledTaskId === undefined
+              ? {}
+              : { scheduledTaskId: message.scheduledTaskId }),
+            ...(message.senderThreadId === undefined
+              ? {}
+              : { senderThreadId: message.senderThreadId }),
+          },
+          modelSelection: run.modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+        })
+        .pipe(Effect.provideService(CheckoutAdmission.ActiveCheckoutOwnership, ownershipHandle));
     });
 
     return ProviderTurnStartServiceV2.of({
