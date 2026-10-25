@@ -503,12 +503,15 @@ const make = Effect.gen(function* () {
         const worktreeCwd = worktreePath;
         branchRename = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
-            git.renameBranch({
-              cwd: worktreeCwd,
-              oldBranch,
-              newBranch,
-              ...(exactName ? { exactName: true } : {}),
-            }),
+            checkoutAdmission.withCurrent(
+              ownershipHandle,
+              git.renameBranch({
+                cwd: worktreeCwd,
+                oldBranch,
+                newBranch,
+                ...(exactName ? { exactName: true } : {}),
+              }),
+            ),
           ),
           Effect.flatMap((renamed) =>
             Effect.gen(function* () {
@@ -683,6 +686,13 @@ const make = Effect.gen(function* () {
       yield* setupTracker.stageStatus(threadId, "agent", "done");
       yield* awaitAsyncSetup;
       yield* setupTracker.finish(threadId, "done");
+      if (runId === null && setup.status === "no-script")
+        yield* input.workspaceStrategy.type === "worktree"
+          ? checkoutAdmission.setupUncertain({ threadId, setupTerminalId: ownershipTerminalId })
+          : checkoutAdmission.setupUnstartedCompleted({
+              threadId,
+              setupTerminalId: ownershipTerminalId,
+            });
     }).pipe(
       Effect.onError((cause) =>
         Effect.gen(function* () {

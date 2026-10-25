@@ -114,6 +114,14 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly setupUncertain?: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
+  readonly setupUnstartedCompleted?: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
   readonly admit?: (
     input: CheckoutAdmission.RunAdmissionInput,
   ) => Effect.Effect<null, CheckoutAdmission.CheckoutAdmissionError>;
@@ -174,13 +182,21 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
-    options.admit === undefined
+    options.admit === undefined &&
+      options.setupUnstartedCompleted === undefined &&
+      options.setupUncertain === undefined
       ? Layer.empty
       : Layer.effect(
           CheckoutAdmission.CheckoutAdmission,
           Effect.map(CheckoutAdmission.CheckoutAdmission, (admission) => ({
             ...admission,
-            admit: options.admit!,
+            ...(options.admit === undefined ? {} : { admit: options.admit }),
+            ...(options.setupUncertain === undefined
+              ? {}
+              : { setupUncertain: options.setupUncertain }),
+            ...(options.setupUnstartedCompleted === undefined
+              ? {}
+              : { setupUnstartedCompleted: options.setupUnstartedCompleted }),
           })),
         ),
     WorktreeSetupTracker.layer,
@@ -317,6 +333,50 @@ function launchInput(input: {
     creationSource: "web" as const,
   };
 }
+
+it.effect.each(["root", "existing_worktree", "worktree"] as const)(
+  "settles empty %s preparation with proof only when no mutating process was launched",
+  (strategy) =>
+    Effect.gen(function* () {
+      const completed = yield* Deferred.make<{
+        readonly threadId: ThreadId;
+        readonly setupTerminalId: string;
+        readonly state: "unstarted" | "unknown";
+      }>();
+      const harness = makeHarness({
+        setupUnstartedCompleted: (input) =>
+          Deferred.succeed(completed, { ...input, state: "unstarted" }).pipe(Effect.asVoid),
+        setupUncertain: (input) =>
+          Deferred.succeed(completed, { ...input, state: "unknown" }).pipe(Effect.asVoid),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const launched = yield* launches.launch(
+          launchInput({
+            command: "empty-setup",
+            thread: "empty-thread",
+            workspace:
+              strategy === "root"
+                ? { type: "root" }
+                : strategy === "existing_worktree"
+                  ? { type: "existing_worktree", worktreePath: "/existing" }
+                  : { type: "worktree", baseRef: "main", startFromOrigin: false },
+          }),
+        );
+        assert.deepEqual(yield* Deferred.await(completed), {
+          threadId: launched.threadId,
+          setupTerminalId: "setup-empty-setup",
+          state: strategy === "worktree" ? "unknown" : "unstarted",
+        });
+        assert.equal(harness.runSetup.mock.calls.length, strategy === "root" ? 0 : 1);
+        const projection =
+          yield* (yield* ThreadManagement.ThreadManagementService).getThreadProjection(
+            launched.threadId,
+          );
+        assert.equal(projection.runs.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
 
 it.effect.each(["root", "existing_worktree", "worktree"] as const)(
   "blocks %s preparation before setup and branch rename when checkout admission fails",

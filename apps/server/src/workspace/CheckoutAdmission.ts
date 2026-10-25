@@ -89,6 +89,14 @@ export class CheckoutAdmission extends Context.Reference<{
     readonly runId: RunId;
     readonly checkpointRef: string | null;
   }) => Effect.Effect<void>;
+  readonly setupUnstartedCompleted: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
+  readonly setupUncertain: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
   readonly terminalOpen: (input: {
     readonly threadId: string;
     readonly terminalId: string;
@@ -117,6 +125,8 @@ export class CheckoutAdmission extends Context.Reference<{
     withVerificationAdmission: (_input, effect) => effect,
     providerDrained: () => Effect.void,
     finalized: () => Effect.void,
+    setupUnstartedCompleted: () => Effect.void,
+    setupUncertain: () => Effect.void,
     terminalOpen: () => Effect.void,
     terminalWrite: () => Effect.void,
     terminalClosed: () => Effect.void,
