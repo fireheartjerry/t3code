@@ -6,10 +6,12 @@ import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Argument, Command } from "effect/cli";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 export type NativePlatform = "ios" | "android";
@@ -45,12 +47,14 @@ export function clientStatus(
   return record.fingerprint === fingerprint ? "compatible" : "stale";
 }
 
+export type ArtifactSource = "local" | "remote" | "build";
+
 /** Keep native sources stable during ensure, as with a normal build; endpoint checks reject detected edits. */
 export const ensureClient = Effect.fn("ensureClient")(function* <E, R, E2, R2>(operations: {
   fingerprint: Effect.Effect<string, E, R>;
   installedBinary: Effect.Effect<string | null, E, R>;
   readRecord: Effect.Effect<NativeClientRecord | null, E, R>;
-  build: Effect.Effect<void, E, R>;
+  install: (fingerprint: string) => Effect.Effect<ArtifactSource, E, R>;
   saveRecord: (record: NativeClientRecord) => Effect.Effect<void, E2, R2>;
 }) {
   const fingerprint = yield* operations.fingerprint;
@@ -69,17 +73,17 @@ export const ensureClient = Effect.fn("ensureClient")(function* <E, R, E2, R2>(o
   });
   yield* verifyInputs;
   if (status === "compatible") {
-    return { status, rebuilt: false, fingerprint };
+    return { status, installed: false, fingerprint };
   }
-  yield* operations.build;
+  const source = yield* operations.install(fingerprint);
   const binary = yield* operations.installedBinary;
   if (binary === null)
     return yield* new NativeClientError({
-      message: "Build finished but the development client is not installed.",
+      message: "Install finished but the development client is not on the device.",
     });
   yield* verifyInputs;
   yield* operations.saveRecord({ fingerprint, binary });
-  return { status: "compatible" as const, rebuilt: true, fingerprint };
+  return { status: "compatible" as const, installed: true, source, fingerprint };
 });
 
 const digest = Effect.fn("nativeClient.digest")(function* (value: string | Uint8Array) {
@@ -184,6 +188,8 @@ const command = Effect.fn("nativeClient.command")(function* (
         T3CODE_IOS_PERSONAL_TEAM: "0",
         CI: "1",
         EXPO_NO_GIT_STATUS: "1",
+        // macOS tar otherwise adds AppleDouble entries that change the extracted bundle.
+        COPYFILE_DISABLE: "1",
       },
       stdin: "ignore",
       stdout: inherit ? "inherit" : "pipe",
@@ -315,6 +321,340 @@ export const prebuildAndroid = Effect.fn("nativeClient.prebuildAndroid")(functio
   );
 });
 
+const artifactNames = { ios: "T3CodeDev.app", android: "app-debug.apk" } as const;
+// R2 requires equal-sized parts and Workers cap request bodies at 100 MB.
+const partSize = 64 * 1024 * 1024;
+const RemoteCredentials = Schema.fromJsonString(
+  Schema.Record(Schema.String, Schema.Struct({ name: Schema.String, token: Schema.String })),
+);
+const decodeCredentials = Schema.decodeUnknownEffect(RemoteCredentials);
+const decodeEndpoint = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ endpoint: Schema.String })),
+);
+const decodeUpload = Schema.decodeUnknownEffect(
+  Schema.Union([
+    Schema.Struct({ exists: Schema.Literal(true) }),
+    Schema.Struct({ uploadId: Schema.String }),
+  ]),
+);
+const decodePart = Schema.decodeUnknownEffect(Schema.Struct({ etag: Schema.String }));
+
+interface RemoteCache {
+  readonly url: string;
+  readonly name: string;
+  readonly token: string;
+}
+
+/** The shared task-cache login (infra/task-cache/install.sh) also authorizes native clients. */
+const remoteCache = Effect.fn("nativeClient.remoteCache")(
+  function* (home: string) {
+    const environment = yield* HostProcess.Environment;
+    if (environment.T3_NATIVE_CLIENT_CACHE === "off") return null;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const { endpoint } = yield* decodeEndpoint(
+      yield* fs.readFileString(path.join((yield* roots).repo, ".task-cache.json")),
+    );
+    const credentials = yield* decodeCredentials(
+      yield* fs.readFileString(path.join(home, ".config/t3-task-cache/credentials.json")),
+    );
+    const login = credentials[endpoint];
+    if (!login) return null;
+    return { url: `${endpoint.replace(/\/$/, "")}/native-clients`, ...login } satisfies RemoteCache;
+  },
+  Effect.catch(() => Effect.succeed(null)),
+);
+
+const authorized = (remote: RemoteCache, request: HttpClientRequest.HttpClientRequest) =>
+  request.pipe(HttpClientRequest.basicAuth(remote.name, remote.token));
+
+/** Download into a sibling staging directory and publish only after the digest matches. */
+const download = Effect.fn("nativeClient.download")(function* (
+  remote: RemoteCache,
+  platform: NativePlatform,
+  key: string,
+  target: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const client = yield* HttpClient.HttpClient;
+  const response = yield* client.execute(
+    authorized(remote, HttpClientRequest.get(`${remote.url}/${key}`)),
+  );
+  if (response.status === 404) return false;
+  yield* HttpClientResponse.filterStatusOk(response);
+  const expected = response.headers["x-t3-digest"] ?? "";
+  if (!/^[a-f0-9]{64}$/.test(expected))
+    return yield* new NativeClientError({ message: "Cached native client has no digest." });
+  yield* Console.error(`Downloading native client ${key} from the shared cache...`);
+  const staging = yield* fs.makeTempDirectory({
+    directory: path.dirname(target),
+    prefix: ".download-",
+  });
+  return yield* Effect.gen(function* () {
+    if (platform === "ios") {
+      const archive = `${staging}.tgz`;
+      yield* response.stream.pipe(Stream.run(fs.sink(archive)));
+      yield* command("tar", ["-xzf", archive, "-C", staging]).pipe(
+        Effect.ensuring(fs.remove(archive, { force: true }).pipe(Effect.ignore)),
+      );
+    } else {
+      yield* response.stream.pipe(Stream.run(fs.sink(path.join(staging, artifactNames.android))));
+    }
+    if ((yield* hashBundle(staging)) !== expected)
+      return yield* new NativeClientError({ message: "Cached native client failed verification." });
+    yield* publish(staging, target);
+    return true;
+  }).pipe(
+    Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),
+  );
+});
+
+/** Upload in fixed-size parts; any failure aborts the upload and leaves the cache unchanged. */
+const upload = Effect.fn("nativeClient.upload")(function* (
+  remote: RemoteCache,
+  platform: NativePlatform,
+  key: string,
+  artifact: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const created = yield* client
+    .execute(
+      authorized(remote, HttpClientRequest.post(`${remote.url}/${key}/uploads`)).pipe(
+        HttpClientRequest.setHeader("x-t3-digest", yield* hashBundle(artifact)),
+      ),
+    )
+    .pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.flatMap(decodeUpload),
+    );
+  if ("exists" in created) return;
+  const uploadUrl = `${remote.url}/${key}/uploads/${encodeURIComponent(created.uploadId)}`;
+  yield* Console.error(`Uploading native client ${key} to the shared cache...`);
+  yield* Effect.gen(function* () {
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-upload-" });
+    const file =
+      platform === "ios"
+        ? path.join(directory, "client.tgz")
+        : path.join(artifact, artifactNames.android);
+    if (platform === "ios")
+      yield* command("tar", ["-czf", file, "-C", artifact, artifactNames.ios]);
+    const handle = yield* fs.open(file);
+    const parts: Array<{ partNumber: number; etag: string }> = [];
+    for (let partNumber = 1; ; partNumber++) {
+      const buffer = new Uint8Array(partSize);
+      let filled = 0;
+      while (filled < partSize) {
+        const read = Number(yield* handle.read(buffer.subarray(filled)));
+        if (read === 0) break;
+        filled += read;
+      }
+      if (filled === 0) break;
+      const { etag } = yield* client
+        .execute(
+          authorized(remote, HttpClientRequest.put(`${uploadUrl}/${partNumber}`)).pipe(
+            HttpClientRequest.bodyUint8Array(buffer.subarray(0, filled)),
+          ),
+        )
+        .pipe(
+          Effect.flatMap((response) => response.json),
+          Effect.flatMap(decodePart),
+        );
+      parts.push({ partNumber, etag });
+      if (filled < partSize) break;
+    }
+    yield* client.execute(
+      authorized(remote, HttpClientRequest.post(`${uploadUrl}/complete`)).pipe(
+        HttpClientRequest.bodyJsonUnsafe({ parts }),
+      ),
+    );
+  }).pipe(
+    Effect.scoped,
+    Effect.onError(() =>
+      client.execute(authorized(remote, HttpClientRequest.delete(uploadUrl))).pipe(Effect.ignore),
+    ),
+  );
+});
+
+const publish = Effect.fn("nativeClient.publish")(function* (staging: string, target: string) {
+  const fs = yield* FileSystem.FileSystem;
+  // A concurrent ensure may have published the same fingerprint first; either copy is valid.
+  if (yield* fs.exists(target)) return;
+  yield* fs.rename(staging, target);
+});
+
+const build = Effect.fn("nativeClient.build")(function* (
+  platform: NativePlatform,
+  abi: string | null,
+  target: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const { repo, mobile } = yield* roots;
+  yield* Console.error("No cached native client for this fingerprint. Building one...");
+  const tracked = yield* command("git", ["ls-files", `apps/mobile/${platform}`], false, repo);
+  if (tracked)
+    return yield* new NativeClientError({
+      message: "Native directory contains tracked files; clean prebuild would overwrite them.",
+    });
+  const prebuild = command(
+    "vp",
+    ["exec", "expo", "prebuild", "--clean", "--platform", platform, "--no-install"],
+    true,
+  ).pipe(Effect.asVoid);
+  yield* platform === "android" ? prebuildAndroid(mobile, prebuild) : prebuild;
+  const staging = yield* fs.makeTempDirectory({
+    directory: path.dirname(target),
+    prefix: ".build-",
+  });
+  yield* Effect.gen(function* () {
+    if (platform === "ios") {
+      const output = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-client-" });
+      yield* command("pod", ["install"], true, path.join(mobile, "ios"));
+      // One device-independent arm64 simulator build installs on every iPhone and iPad simulator.
+      yield* command(
+        "xcrun",
+        [
+          "xcodebuild",
+          "-workspace",
+          path.join(mobile, "ios/T3CodeDev.xcworkspace"),
+          "-scheme",
+          "T3CodeDev",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "generic/platform=iOS Simulator",
+          "-derivedDataPath",
+          output,
+          "ARCHS=arm64",
+          "ONLY_ACTIVE_ARCH=NO",
+          "build",
+        ],
+        true,
+      );
+      yield* command("ditto", [
+        path.join(output, "Build/Products/Debug-iphonesimulator", artifactNames.ios),
+        path.join(staging, artifactNames.ios),
+      ]);
+    } else {
+      const android = path.join(mobile, "android");
+      yield* command(
+        path.join(android, (yield* HostProcess.Platform) === "win32" ? "gradlew.bat" : "gradlew"),
+        ["app:assembleDebug", `-PreactNativeArchitectures=${abi}`],
+        true,
+        android,
+      );
+      yield* fs.copyFile(
+        path.join(android, "app/build/outputs/apk/debug", artifactNames.android),
+        path.join(staging, artifactNames.android),
+      );
+    }
+    yield* publish(staging, target);
+  }).pipe(
+    Effect.scoped,
+    Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),
+  );
+});
+
+/** Keep the newest few fingerprints per platform; each artifact is a few hundred megabytes. */
+const prune = Effect.fn("nativeClient.prune")(
+  function* (parent: string, keep: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const entries = yield* Effect.forEach(
+      (yield* fs.readDirectory(parent)).filter((name) => !name.startsWith(".")),
+      (name) =>
+        fs.stat(path.join(parent, name)).pipe(
+          Effect.map((info) => ({
+            name,
+            modified: Option.getOrUndefined(info.mtime)?.getTime() ?? 0,
+          })),
+        ),
+    );
+    const stale = entries
+      .filter(({ name }) => name !== keep)
+      .sort((a, b) => b.modified - a.modified)
+      .slice(2);
+    yield* Effect.forEach(
+      stale,
+      ({ name }) => fs.remove(path.join(parent, name), { recursive: true, force: true }),
+      { discard: true },
+    );
+  },
+  (effect) => Effect.ignore(effect),
+);
+
+/** Local artifact, then the shared cache, then a build that is shared back when credentials allow. */
+export const resolveArtifact = Effect.fn("nativeClient.resolveArtifact")(function* (
+  home: string,
+  platform: NativePlatform,
+  abi: string | null,
+  fingerprint: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const key = `${platform}/${abi ? `development-${abi}` : "development"}/${fingerprint}`;
+  const directory = path.join(home, ".cache/t3code/native-clients/artifacts", key);
+  const artifact = { directory, file: path.join(directory, artifactNames[platform]) };
+  if (yield* fs.exists(artifact.file)) return { ...artifact, source: "local" as const };
+  yield* fs.makeDirectory(path.dirname(directory), { recursive: true });
+  const remote = yield* remoteCache(home);
+  if (remote) {
+    const downloaded = yield* download(remote, platform, key, directory).pipe(
+      Effect.catch((error) =>
+        Console.error(`Shared native client cache unavailable (${describe(error)}).`).pipe(
+          Effect.as(false),
+        ),
+      ),
+    );
+    if (downloaded) {
+      yield* prune(path.dirname(directory), fingerprint);
+      return { ...artifact, source: "remote" as const };
+    }
+  }
+  yield* build(platform, abi, directory);
+  yield* prune(path.dirname(directory), fingerprint);
+  if (remote && (yield* HostProcess.Environment).T3_NATIVE_CLIENT_CACHE !== "read") {
+    yield* upload(remote, platform, key, directory).pipe(
+      Effect.catch((error) => Console.error(`Native client was not shared (${describe(error)}).`)),
+    );
+  }
+  return { ...artifact, source: "build" as const };
+});
+
+const describe = (error: unknown) =>
+  typeof error === "object" &&
+  error !== null &&
+  "message" in error &&
+  typeof error.message === "string"
+    ? error.message
+    : String(error);
+
+const install = Effect.fn("nativeClient.install")(function* (
+  platform: NativePlatform,
+  device: string,
+  file: string,
+) {
+  if (platform === "ios") {
+    yield* command("xcrun", ["simctl", "install", device, file], true);
+    return;
+  }
+  yield* command("adb", ["-s", device, "install", "-r", file]).pipe(
+    Effect.catchTags({
+      NativeClientError: (error) =>
+        Effect.fail(
+          error.message.includes("INSTALL_FAILED_UPDATE_INCOMPATIBLE")
+            ? new NativeClientError({
+                message: `The installed client has a different signature. Remove it with adb -s ${device} uninstall ${bundleId} (this clears its pairings), then run ensure again.`,
+              })
+            : error,
+        ),
+    }),
+  );
+});
+
 const main = Command.make(
   "mobile-native-client",
   {
@@ -338,6 +678,14 @@ const main = Command.make(
       platform,
       `${yield* digest(device)}.json`,
     );
+    // An iOS simulator build is arm64 for every device; an APK carries only the emulator's own ABI.
+    const emulatorAbi = Effect.gen(function* () {
+      if (platform === "ios") return null;
+      const abi = yield* command("adb", ["-s", device, "shell", "getprop", "ro.product.cpu.abi"]);
+      if (abi !== "x86_64" && abi !== "arm64-v8a")
+        return yield* new NativeClientError({ message: `Unsupported emulator ABI ${abi}.` });
+      return abi;
+    });
     const operations = {
       fingerprint: fingerprint(platform),
       installedBinary: installedBinary(platform, device),
@@ -349,76 +697,11 @@ const main = Command.make(
           () => Effect.succeed(null),
         ),
       ),
-      build: Effect.gen(function* () {
-        yield* Console.error(
-          "Native client is missing, stale, or unverified. Building and installing a development client...",
-        );
-        const tracked = yield* command(
-          "git",
-          ["ls-files", `apps/mobile/${platform}`],
-          false,
-          (yield* roots).repo,
-        );
-        if (tracked)
-          return yield* new NativeClientError({
-            message:
-              "Native directory contains tracked files; clean prebuild would overwrite them.",
-          });
-        const prebuild = command(
-          "vp",
-          ["exec", "expo", "prebuild", "--clean", "--platform", platform, "--no-install"],
-          true,
-        ).pipe(Effect.asVoid);
-        yield* platform === "android" ? prebuildAndroid((yield* roots).mobile, prebuild) : prebuild;
-        if (platform === "ios") {
-          const output = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-client-" });
-          const { mobile } = yield* roots;
-          yield* command("pod", ["install"], true, path.join(mobile, "ios"));
-          yield* command(
-            "xcrun",
-            [
-              "xcodebuild",
-              "-workspace",
-              path.join(mobile, "ios/T3CodeDev.xcworkspace"),
-              "-scheme",
-              "T3CodeDev",
-              "-configuration",
-              "Debug",
-              "-destination",
-              `id=${device}`,
-              "-derivedDataPath",
-              output,
-              "build",
-            ],
-            true,
-          );
-          yield* command(
-            "xcrun",
-            [
-              "simctl",
-              "install",
-              device,
-              path.join(output, "Build/Products/Debug-iphonesimulator/T3CodeDev.app"),
-            ],
-            true,
-          );
-        } else {
-          yield* command(
-            "vp",
-            [
-              "exec",
-              "expo",
-              "run:android",
-              "--device",
-              device,
-              "--no-bundler",
-              "--variant",
-              "debug",
-            ],
-            true,
-          );
-        }
-      }).pipe(Effect.scoped),
+      install: Effect.fn(function* (fingerprint: string) {
+        const artifact = yield* resolveArtifact(home, platform, yield* emulatorAbi, fingerprint);
+        yield* install(platform, device, artifact.file);
+        return artifact.source;
+      }),
       saveRecord: Effect.fn(function* (record: NativeClientRecord) {
         yield* fs.makeDirectory(path.dirname(recordPath), { recursive: true });
         yield* fs.writeFileString(recordPath, yield* encodeRecord(record));
@@ -451,7 +734,7 @@ const main = Command.make(
 if (import.meta.main) {
   Command.run(main, { version: "0.0.0" }).pipe(
     Effect.scoped,
-    Effect.provide(NodeServices.layer),
+    Effect.provide([NodeServices.layer, FetchHttpClient.layer]),
     NodeRuntime.runMain,
   );
 }

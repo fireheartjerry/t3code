@@ -31,11 +31,17 @@ node ../../scripts/mobile-native-client.ts ensure ios <simulator-udid>
 vp run dev:client
 ```
 
-The helper compares a local Expo fingerprint and the installed binary with its last successful
-build record. It builds and installs missing, stale, or unverified clients and reuses matching ones.
-Use `check` instead of `ensure` for a read-only decision: exit 0 means compatible, 2 means a build is
-needed, and 1 means an operational error. Run it on the simulator host; no EAS login is required.
-An externally installed client is unverified until the helper builds it once.
+The helper compares a local Expo fingerprint and the installed binary with its last install
+record. Missing, stale, or unverified clients are installed from a build for that fingerprint,
+looked up in `~/.cache/t3code/native-clients/artifacts`, then the shared task cache, and built only
+when neither has it. One iOS simulator build serves every iPhone and iPad simulator, and one APK
+per emulator ABI (x86_64 or arm64-v8a) serves every emulator of that ABI. Builds are shared back when your task-cache login
+(`bash infra/task-cache/install.sh`) can write. `T3_NATIVE_CLIENT_CACHE=read` skips the upload and
+`off` skips the shared cache.
+
+Use `check` instead of `ensure` for a read-only decision: exit 0 means compatible, 2 means an install
+is needed, and 1 means an operational error. Run it on the simulator host; no EAS login is required.
+An externally installed client is unverified until the helper installs it once.
 
 Start Metro for an already verified dev client:
 
