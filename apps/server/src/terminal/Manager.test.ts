@@ -8,6 +8,7 @@ import {
   type TerminalRestartInput,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   TerminalProviderInstanceNotFoundError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -33,6 +34,8 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
+import * as WorkspaceExecutionApi from "../workspace/WorkspaceExecutionApi.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -49,6 +52,7 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   readonly writes: string[] = [];
   readonly resizeCalls: Array<{ cols: number; rows: number }> = [];
   readonly killSignals: Array<string | undefined> = [];
+  readonly capturedExitCallbacks: Array<(event: PtyAdapter.PtyExitEvent) => void> = [];
   readonly pid: number;
   writeFailure: unknown | undefined;
   resizeFailure: unknown | undefined;
@@ -90,6 +94,7 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   }
 
   onExit(callback: (event: PtyAdapter.PtyExitEvent) => void): () => void {
+    this.capturedExitCallbacks.push(callback);
     if (this.exitOnSubscribe) callback(this.exitOnSubscribe);
     this.exitListeners.add(callback);
     return () => {
@@ -415,6 +420,203 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect(
+    "uses admission installed after manager construction and retains its natural-exit hook",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager();
+        const base = yield* CheckoutAdmission.CheckoutAdmission;
+        const calls: string[] = [];
+        const closed = yield* Deferred.make<void>();
+        const admission = {
+          ...base,
+          terminalOpen: () =>
+            Effect.sync(() => {
+              calls.push("open");
+            }),
+          terminalStarted: (input: { readonly pid: number }) =>
+            Effect.sync(() => {
+              calls.push(`started:${input.pid}`);
+            }),
+          terminalWrite: () =>
+            Effect.sync(() => {
+              calls.push("write");
+            }),
+          terminalClosed: () =>
+            Effect.gen(function* () {
+              expect((yield* getEvents).at(-1)?.type).toBe("exited");
+              calls.push("closed");
+              yield* Deferred.succeed(closed, undefined);
+            }),
+        };
+        yield* manager
+          .open(openInput())
+          .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+        yield* manager
+          .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "check\n" })
+          .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+        expect(calls).toEqual(["open", `started:${ptyAdapter.processes[0]!.pid}`, "write"]);
+        ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: null });
+        yield* Deferred.await(closed);
+        expect(calls.at(-1)).toBe("closed");
+      }),
+  );
+
+  it.effect("rejects a live admission conflict before any terminal spawn", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const failure = new CheckoutAdmission.CheckoutAdmissionError({
+        threadId: ThreadId.make("thread-1"),
+      });
+      const error = yield* manager.open(openInput()).pipe(
+        Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+          ...base,
+          terminalOpen: () => failure,
+        }),
+        Effect.flip,
+      );
+      expect(error._tag).toBe("TerminalWriteError");
+      expect(ptyAdapter.spawnInputs).toHaveLength(0);
+    }),
+  );
+
+  it.effect("confirms explicit closure only after the captured process emits its exit", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const confirmations: boolean[] = [];
+      const closed = yield* Deferred.make<void>();
+      const admission = {
+        ...base,
+        terminalClosed: (input: { readonly confirmed: boolean }) =>
+          Effect.gen(function* () {
+            confirmations.push(input.confirmed);
+            if (input.confirmed) {
+              expect(ptyAdapter.processes[0]!.killed).toBe(true);
+              yield* Deferred.succeed(closed, undefined);
+            }
+          }),
+      };
+      yield* manager
+        .open(openInput())
+        .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+      const process = ptyAdapter.processes[0]!;
+      process.onKill = () => process.emitExit({ exitCode: 0, signal: null });
+      yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+      yield* Deferred.await(closed);
+      expect(confirmations).toEqual([false, true]);
+    }),
+  );
+
+  it.effect("gates a managed restart after predecessor stop and before replacement spawn", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const events: string[] = [];
+      const admission = {
+        ...base,
+        terminalOpen: () =>
+          Effect.sync(() => {
+            events.push(`open:${ptyAdapter.processes.length}`);
+          }),
+        terminalStarted: () =>
+          Effect.sync(() => {
+            events.push("started");
+          }),
+        terminalClosed: (input: { readonly confirmed: boolean }) =>
+          Effect.sync(() => {
+            events.push(`closed:${input.confirmed}`);
+          }),
+      };
+      yield* manager
+        .open(openInput())
+        .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+      const first = ptyAdapter.processes[0]!;
+      first.onKill = () => first.emitExit({ exitCode: 0, signal: null });
+      yield* manager
+        .restart(restartInput())
+        .pipe(
+          Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission),
+          Effect.provideService(WorkspaceExecutionApi.WorkspaceExecutionAvailable, true),
+        );
+      expect(events).toEqual([
+        "open:0",
+        "started",
+        "closed:false",
+        "closed:true",
+        "open:1",
+        "started",
+      ]);
+      ptyAdapter.processes[1]!.onKill = () =>
+        ptyAdapter.processes[1]!.emitExit({ exitCode: 0, signal: null });
+    }),
+  );
+
+  it.effect("keeps an unconfirmed predecessor blocking subsequent respawn attempts", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      ptyAdapter.processes[0]!.onKill = () => {
+        throw new Error("fixture signal failure");
+      };
+      const restarting = yield* manager
+        .restart(restartInput())
+        .pipe(
+          Effect.provideService(WorkspaceExecutionApi.WorkspaceExecutionAvailable, true),
+          Effect.flip,
+        );
+      expect(restarting._tag).toBe("TerminalWriteError");
+      const reopening = yield* manager
+        .open(openInput())
+        .pipe(
+          Effect.provideService(WorkspaceExecutionApi.WorkspaceExecutionAvailable, true),
+          Effect.flip,
+        );
+      expect(reopening._tag).toBe("TerminalWriteError");
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  it.effect("ignores stale process callbacks even when the replacement reuses its PID", () =>
+    Effect.gen(function* () {
+      class ReusedPidAdapter extends FakePtyAdapter {
+        override spawn(input: PtyAdapter.PtySpawnInput) {
+          this.spawnInputs.push(input);
+          const process = new FakePtyProcess(9000);
+          this.processes.push(process);
+          return Effect.succeed(process);
+        }
+      }
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        ptyAdapter: new ReusedPidAdapter(),
+      });
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const confirmations: boolean[] = [];
+      const admission = {
+        ...base,
+        terminalClosed: (input: { readonly confirmed: boolean }) =>
+          Effect.sync(() => {
+            confirmations.push(input.confirmed);
+          }),
+      };
+      yield* manager
+        .open(openInput())
+        .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+      const staleExit = ptyAdapter.processes[0]!.capturedExitCallbacks[0]!;
+      yield* manager
+        .restart(restartInput())
+        .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+      staleExit({ exitCode: 0, signal: null });
+      const current = yield* manager
+        .open(openInput())
+        .pipe(Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission));
+      expect(current.status).toBe("running");
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      expect(confirmations).not.toContain(true);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
@@ -728,7 +930,7 @@ it.layer(
       expect(events.filter((event) => event.type === "output").map((event) => event.data)).toEqual(
         writes,
       );
-      const snapshot = events.filter((event) => event.type === "snapshot").at(-1)?.snapshot;
+      const snapshot = events.findLast((event) => event.type === "snapshot")?.snapshot;
       expect(snapshot?.history).toBe("aa😀\rEND");
       expect(snapshot?.sequence).toBe(reopened.sequence);
     }),
