@@ -458,9 +458,7 @@ const make = Effect.gen(function* () {
     yield* accounting
       .register({ handle, processRef, kind: "verification-unstarted" })
       .pipe(Effect.ignore);
-    yield* accounting
-      .mark({ owner: handle.owner, processRef, state: "stopped" })
-      .pipe(Effect.ignore);
+    yield* accounting.mark({ handle, processRef, state: "stopped" }).pipe(Effect.ignore);
     yield* ownership
       .releaseWhenQuiescent({
         commandId: CommandId.make(`${record.verificationId}:release-unstarted`),
@@ -832,7 +830,7 @@ const make = Effect.gen(function* () {
             .register({ handle: failed.ownerHandle, processRef, kind: "verification-unstarted" })
             .pipe(Effect.ignore);
           yield* accounting
-            .mark({ owner: failed.ownerHandle.owner, processRef, state: "stopped" })
+            .mark({ handle: failed.ownerHandle, processRef, state: "stopped" })
             .pipe(Effect.ignore);
           yield* ownership.reconcileClaim(failed.ownerHandle).pipe(Effect.ignore);
         }

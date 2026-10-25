@@ -1,4 +1,4 @@
-import type { OwnershipHandle, OwnershipOwner } from "@t3tools/contracts";
+import type { OwnershipHandle } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -37,15 +37,25 @@ export class CheckoutProcessAccounting extends Context.Service<
       readonly processRef: OwnedProcessIdentity;
       readonly kind: string;
     }) => Effect.Effect<void, CheckoutProcessAccountingError>;
-    readonly observe: (owner: OwnershipOwner) => Effect.Effect<OwnershipProcessObservation>;
+    readonly observe: (handle: OwnershipHandle) => Effect.Effect<OwnershipProcessObservation>;
     readonly mark: (input: {
-      readonly owner: OwnershipOwner;
+      readonly handle: OwnershipHandle;
       readonly processRef: OwnedProcessIdentity;
       readonly state: "live" | "stopped" | "unknown";
     }) => Effect.Effect<void, CheckoutProcessAccountingError>;
-    readonly whenQuiescent: (owner: OwnershipOwner) => Effect.Effect<OwnershipProcessObservation>;
+    readonly whenQuiescent: (handle: OwnershipHandle) => Effect.Effect<OwnershipProcessObservation>;
   }
 >()("t3/workspace/CheckoutProcessAccounting") {}
+
+const encodeKey = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+const accountingKey = (handle: OwnershipHandle) =>
+  encodeKey([
+    ownerKey(handle.owner),
+    handle.checkoutKey,
+    handle.ownershipId,
+    String(handle.generation),
+    handle.serverInstanceId,
+  ]);
 
 const make = Effect.gen(function* () {
   const changes = yield* PubSub.unbounded<string>();
@@ -60,8 +70,10 @@ const make = Effect.gen(function* () {
       >;
     }
   >();
-  const observe = Effect.fn("CheckoutProcessAccounting.observe")(function* (owner: OwnershipOwner) {
-    const entry = owners.get(ownerKey(owner));
+  const observe = Effect.fn("CheckoutProcessAccounting.observe")(function* (
+    handle: OwnershipHandle,
+  ) {
+    const entry = owners.get(accountingKey(handle));
     const processes = [...(entry?.processes.values() ?? [])];
     const state =
       entry === undefined ||
@@ -84,7 +96,7 @@ const make = Effect.gen(function* () {
     readonly processRef: OwnedProcessIdentity;
     readonly kind: string;
   }) {
-    const key = ownerKey(input.handle.owner);
+    const key = accountingKey(input.handle);
     const entry = owners.get(key) ?? { revision: 0, uncertain: false, processes: new Map() };
     const existing = entry.processes.get(input.processRef.id);
     if (
@@ -109,11 +121,11 @@ const make = Effect.gen(function* () {
   });
 
   const mark = Effect.fn("CheckoutProcessAccounting.mark")(function* (input: {
-    readonly owner: OwnershipOwner;
+    readonly handle: OwnershipHandle;
     readonly processRef: OwnedProcessIdentity;
     readonly state: "live" | "stopped" | "unknown";
   }) {
-    const key = ownerKey(input.owner);
+    const key = accountingKey(input.handle);
     const entry = owners.get(key);
     const process = entry?.processes.get(input.processRef.id);
     if (entry === undefined || process === undefined)
@@ -133,11 +145,11 @@ const make = Effect.gen(function* () {
   });
 
   const whenQuiescent = Effect.fn("CheckoutProcessAccounting.whenQuiescent")(function* (
-    owner: OwnershipOwner,
+    handle: OwnershipHandle,
   ) {
     const subscription = yield* PubSub.subscribe(changes);
     for (;;) {
-      const observation = yield* observe(owner);
+      const observation = yield* observe(handle);
       if (observation.state !== "live") return observation;
       yield* PubSub.take(subscription);
     }

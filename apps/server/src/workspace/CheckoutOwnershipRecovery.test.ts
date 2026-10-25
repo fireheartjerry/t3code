@@ -73,7 +73,7 @@ const fixture = Effect.gen(function* () {
   ) {
     const processRef = { id: "process", creationMarker: "captured-creation", pid: 123 };
     yield* accounting.register({ handle, processRef, kind: "provider" });
-    yield* accounting.mark({ owner: handle.owner, processRef, state });
+    yield* accounting.mark({ handle, processRef, state });
   });
   return { store, sql, ownership, recovery, acquire, mark };
 });

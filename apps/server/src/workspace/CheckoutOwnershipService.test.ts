@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -94,12 +95,47 @@ const fixture = Effect.gen(function* () {
   ) {
     const processRef = { id: handle.ownershipId, creationMarker: "created-once", pid: 123 };
     yield* accounting.register({ handle, processRef, kind: "provider" });
-    yield* accounting.mark({ owner: handle.owner, processRef, state });
+    yield* accounting.mark({ handle, processRef, state });
   });
   return { service, store, sql, physical, acquire, acquireWithIntent, mark, notifications };
 });
 
 describe("checkout ownership service", () => {
+  it.effect("never reuses a prior generation's stopped proof for release or transfer", () =>
+    Effect.gen(function* () {
+      const { service, acquire, mark } = yield* fixture;
+      const old = yield* acquire("generation-proof");
+      yield* mark(old, "stopped");
+      const next = yield* service.advanceOperation({
+        commandId: CommandId.make("next-phase"),
+        handle: old,
+        nextOperation: "finalization",
+      });
+      assert.strictEqual(
+        yield* service.releaseWhenQuiescent({
+          commandId: CommandId.make("new-release"),
+          handle: next,
+        }),
+        "uncertain",
+      );
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            service.transfer({
+              commandId: CommandId.make("new-transfer"),
+              handle: next,
+              nextOwner: {
+                kind: "run",
+                threadId: ThreadId.make("next-thread"),
+                runId: RunId.make("next-run"),
+              },
+              nextOperation: "provider",
+            }),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(dependencies)),
+  );
   it.effect(
     "rolls back an explicit verification acquisition and intent without a claim, event or receipt",
     () =>

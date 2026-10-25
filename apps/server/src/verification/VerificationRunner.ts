@@ -217,7 +217,7 @@ const make = Effect.gen(function* () {
                 }),
               );
               registered = true;
-              yield* accounting.mark({ owner: handle.owner, processRef, state: "live" }).pipe(
+              yield* accounting.mark({ handle, processRef, state: "live" }).pipe(
                 Effect.mapError(() => {
                   accountingFailed = true;
                   return new ProcessRunner.ProcessSpawnError({
@@ -245,7 +245,7 @@ const make = Effect.gen(function* () {
                 // ProcessRunner's scoped cleanup completes before this finalizer, including on interruption.
                 Effect.onExit(() =>
                   registered && processRef !== undefined
-                    ? accounting.mark({ owner: handle.owner, processRef, state: "unknown" }).pipe(
+                    ? accounting.mark({ handle, processRef, state: "unknown" }).pipe(
                         Effect.catch(() =>
                           Effect.sync(() => {
                             accountingFailed = true;

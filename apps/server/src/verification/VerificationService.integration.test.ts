@@ -532,7 +532,7 @@ it.effect(
       if (acquired._tag !== "Acquired") throw new Error("Fixture owner missing");
       const processRef = { id: "provider", creationMarker: "provider" };
       yield* f.accounting.register({ handle: acquired.handle, processRef, kind: "provider" });
-      yield* f.accounting.mark({ owner: acquired.handle.owner, processRef, state: "stopped" });
+      yield* f.accounting.mark({ handle: acquired.handle, processRef, state: "stopped" });
       const input = {
         ...request("automatic"),
         sourceRunId: runId,
@@ -670,7 +670,7 @@ it.effect("handoff SQL failure rolls back owner transfer, evidence and execution
     if (acquired._tag !== "Acquired") throw new Error("Fixture owner missing");
     const processRef = { id: "provider", creationMarker: "provider" };
     yield* f.accounting.register({ handle: acquired.handle, processRef, kind: "provider" });
-    yield* f.accounting.mark({ owner: acquired.handle.owner, processRef, state: "stopped" });
+    yield* f.accounting.mark({ handle: acquired.handle, processRef, state: "stopped" });
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TRIGGER reject_intent BEFORE INSERT ON orchestration_v2_verification_attempts BEGIN SELECT RAISE(ABORT, 'fixture'); END`;
     yield* f.service

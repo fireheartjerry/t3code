@@ -366,7 +366,7 @@ const make = Effect.gen(function* () {
         return receipt.handle;
       }
       yield* current(input.handle, true);
-      const observation = yield* accounting.observe(input.handle.owner);
+      const observation = yield* accounting.observe(input.handle);
       if (observation.state !== "stopped") {
         if (observation.state === "unknown") {
           yield* store.transition({
@@ -422,7 +422,7 @@ const make = Effect.gen(function* () {
           ? ("released" as const)
           : ("uncertain" as const);
       yield* current(input.handle, true);
-      const observation = yield* accounting.observe(input.handle.owner);
+      const observation = yield* accounting.observe(input.handle);
       if (observation.state === "live") return "uncertain" as const;
       yield* store.transition({
         ...input,
@@ -445,7 +445,7 @@ const make = Effect.gen(function* () {
           CheckoutIdentityError: () => Effect.succeed(false),
         }),
       );
-      const observation = yield* accounting.observe(handle.owner);
+      const observation = yield* accounting.observe(handle);
       const release = identityValid && observation.state === "stopped";
       const uncertain =
         !identityValid ||
