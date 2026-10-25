@@ -30,6 +30,8 @@ import {
 } from "./model.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, type ProjectMutation } from "./project.ts";
+import { WorkspaceOwnershipPolicy } from "./checkoutOwnership.ts";
+import { VerificationConfig } from "./verification.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
 import {
@@ -953,6 +955,8 @@ export const WorktreeCleanup = Schema.NullOr(
 export type WorktreeCleanup = typeof WorktreeCleanup.Type;
 
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
+  "workspaceOwnership",
+  "verification",
   "worktreeCleanup",
   "defaultModelSelection",
   "defaultRuntimeMode",
@@ -990,6 +994,8 @@ export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOver
 /** Absent keys inherit; null is a value for nullable settings.
  * providerInstances overrides fields per instance; other keys replace the whole setting. */
 export const ProjectSettingsOverrides = Schema.Struct({
+  workspaceOwnership: Schema.optionalKey(WorkspaceOwnershipPolicy),
+  verification: Schema.optionalKey(Schema.NullOr(VerificationConfig)),
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
@@ -1031,6 +1037,7 @@ const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettin
     [K in ProjectScopedServerSettingKey]: null extends ProjectSettingsOverrides[K] ? K : never;
   }[ProjectScopedServerSettingKey]
 >([
+  "verification",
   "defaultModelSelection",
   "sourceControlWriterModelSelection",
   "reviewGuideModelSelection",
@@ -1129,6 +1136,12 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   defaultAutoPull: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  workspaceOwnership: WorkspaceOwnershipPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed("off" as const)),
+  ),
+  verification: Schema.NullOr(VerificationConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   defaultProjectScripts: Schema.Array(ProjectScript).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -1422,6 +1435,8 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  workspaceOwnership: Schema.optionalKey(WorkspaceOwnershipPolicy),
+  verification: Schema.optionalKey(Schema.NullOr(VerificationConfig)),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

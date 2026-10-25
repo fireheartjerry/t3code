@@ -1,4 +1,7 @@
 export * from "./baseSchemas.ts";
+export * from "./checkoutOwnership.ts";
+export * from "./verification.ts";
+export * from "./workspaceExecutionRpc.ts";
 export * from "./assistantCitations.ts";
 export * from "./composerContext.ts";
 export * from "./composerContextClipboard.ts";
