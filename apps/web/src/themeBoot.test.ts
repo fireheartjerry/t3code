@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import indexHtml from "../index.html?raw";
+import mintDark from "./themes/mint-dark.json";
 import {
   CUSTOM_THEMES_STORAGE_KEY,
   getDefaultThemeColors,
@@ -252,6 +253,21 @@ describe("index.html boot script", () => {
   it.each(parityCases)("matches the runtime appearance: $name", ({ storage, prefersDark }) => {
     const boot = runBootScript({ storage, prefersDark });
     expect(boot.isDark).toBe(runtimeResolvedAppearance(storage, prefersDark) === "dark");
+  });
+
+  it.each([false, true])("boots Mint Dark before mounting with OS dark=%s", (prefersDark) => {
+    const boot = runBootScript({
+      storage: { [THEME_STORAGE_KEY]: "mint-dark", [THEME_FOLLOW_SYSTEM_STORAGE_KEY]: "true" },
+      prefersDark,
+    });
+    expect(boot.isDark).toBe(true);
+    expect(boot.themeId).toBe(mintDark.id);
+    expect(boot.themeSelected).toBe("true");
+    expect(boot.bootVariables["--boot-background"]).toBe(mintDark.colors.canvas);
+    expect(boot.bootVariables["--boot-foreground"]).toBe(mintDark.colors.text);
+    expect(boot.bootVariables["--boot-accent"]).toBe(mintDark.colors.accent);
+    expect(boot.backgroundColor).toBe(mintDark.colors.chrome);
+    expect(boot.metaContent).toBe(mintDark.colors.chrome);
   });
 
   it("accepts exponent-form OKLCH before the runtime mounts", () => {

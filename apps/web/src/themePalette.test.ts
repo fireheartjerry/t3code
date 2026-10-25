@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { converter } from "culori/fn";
-import { BUILT_IN_THEMES } from "@t3tools/shared/themePalettes";
+import mintDark from "./themes/mint-dark.json";
 
 import {
+  BUILT_IN_THEMES,
   getThemeColorsForMode,
+  getThemeDefinition,
+  isReservedThemeId,
   getThemeModes,
   getCustomThemes,
   getStandardThemeColors,
@@ -57,6 +60,24 @@ function contrastRatio(first: string, second: string): number {
 }
 
 describe("theme files", () => {
+  it("resolves Mint Dark without importing or storing a custom theme", () => {
+    const theme = getThemeDefinition("mint-dark");
+    expect(theme).toMatchObject({
+      id: mintDark.id,
+      label: mintDark.name,
+      appearance: "dark",
+      colors: mintDark.colors,
+    });
+    expect(getThemeModes(theme!)).toEqual(["dark"]);
+    expect(resolveThemeAppearance("mint-dark", false, true)).toBe("dark");
+    expect(resolveDesktopTheme("mint-dark", true)).toBe("dark");
+  });
+
+  it("protects Mint Dark from custom theme id collisions", () => {
+    expect(isReservedThemeId("mint-dark")).toBe(true);
+    expect(() => parseThemeFile(mintDark)).toThrow('The theme id "mint-dark" is reserved.');
+  });
+
   it("keeps built-in and standard search pairs readable and distinct from inline code", () => {
     const toOklab = converter("oklab");
     const distance = (first: string, second: string) => {

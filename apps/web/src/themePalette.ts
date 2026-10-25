@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema";
 import "culori/css";
 import { converter, parse } from "culori/fn";
 import {
-  BUILT_IN_THEMES,
+  BUILT_IN_THEMES as SHARED_BUILT_IN_THEMES,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -11,7 +11,7 @@ import {
   T3_CHAT_THEME,
   T3_CODE_LIGHT_THEME_COLORS,
   T3_CODE_DARK_THEME_COLORS,
-  RESERVED_THEME_IDS,
+  RESERVED_THEME_IDS as SHARED_RESERVED_THEME_IDS,
   THEME_COLOR_ROLES,
   type ThemeAppearance,
   type ThemeColorRole,
@@ -19,6 +19,16 @@ import {
   type ThemeDefinition,
   type ThemeVariants,
 } from "@t3tools/shared/themePalettes";
+import mintDark from "./themes/mint-dark.json";
+
+export const BUILT_IN_THEMES: ReadonlyArray<ThemeDefinition> = [
+  ...SHARED_BUILT_IN_THEMES,
+  { id: mintDark.id, label: mintDark.name, appearance: "dark", colors: mintDark.colors },
+];
+const RESERVED_THEME_IDS: ReadonlySet<string> = new Set([
+  ...SHARED_RESERVED_THEME_IDS,
+  ...BUILT_IN_THEMES.map((theme) => theme.id),
+]);
 
 export { EMBER_THEME, GROVE_THEME, IRIS_THEME, OCEAN_THEME, T3_CHAT_THEME, THEME_COLOR_ROLES };
 export type { ThemeAppearance, ThemeColorRole, ThemeColors, ThemeDefinition, ThemeVariants };
