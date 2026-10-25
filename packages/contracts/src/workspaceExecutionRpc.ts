@@ -17,9 +17,10 @@ import {
 import {
   CheckoutOwnershipRecord,
   CheckoutOwnershipWait,
+  OwnershipGeneration,
   OwnershipConflict,
 } from "./checkoutOwnership.ts";
-import { VerificationRecord } from "./verification.ts";
+import { VerificationRecord, VERIFICATION_MAX_OUTPUT_BYTES } from "./verification.ts";
 import { RpcScopeAuthorization } from "./rpc.ts";
 
 export const WORKSPACE_EXECUTION_METHODS = {
@@ -60,10 +61,24 @@ export class WorkspaceExecutionRequestError extends Schema.TaggedError<Workspace
 ) {
   override get message(): string {
     return this.reason === "conflict"
-      ? `Checkout is owned by thread ${this.conflict?.owner.threadId ?? "unknown"}. Open the owner, wait, or create an isolated worktree.`
+      ? `${this.conflict?.state === "uncertain" ? "Process liveness is uncertain; checkout remains" : "Checkout is"} owned by thread ${this.conflict?.owner.threadId ?? "unknown"}. Open the owner, wait, or create an isolated worktree.`
       : `Workspace execution request could not proceed: ${this.reason}.`;
   }
 }
+
+const workspaceError = WorkspaceExecutionRequestError.check(
+  Schema.makeFilter((error) => error.reason !== "conflict" || error.conflict !== undefined, {
+    expected: "ownership details for a checkout conflict",
+  }),
+);
+const activeOwnership = CheckoutOwnershipRecord.check(
+  Schema.makeFilter((record) => record.state !== "released", {
+    expected: "active checkout ownership",
+  }),
+);
+const cancelledWait = CheckoutOwnershipWait.check(
+  Schema.makeFilter((waiter) => waiter.state === "cancelled", { expected: "a cancelled waiter" }),
+);
 
 const threadInput = Schema.Struct({ threadId: ThreadId });
 const verificationInput = Schema.Struct({ verificationId: TrimmedNonEmptyString });
@@ -71,13 +86,18 @@ const verificationInput = Schema.Struct({ verificationId: TrimmedNonEmptyString 
 export const WorkspaceExecutionRpcGroup = RpcGroup.make(
   Rpc.make(WORKSPACE_EXECUTION_METHODS.inspect, {
     payload: threadInput,
-    success: Schema.NullOr(CheckoutOwnershipRecord),
-    error: WorkspaceExecutionRequestError,
+    success: Schema.NullOr(activeOwnership),
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.wait, {
-    payload: Schema.Struct({ threadId: ThreadId, commandId: CommandId }),
+    payload: Schema.Struct({
+      threadId: ThreadId,
+      commandId: CommandId,
+      checkoutKey: TrimmedNonEmptyString,
+      generation: OwnershipGeneration,
+    }),
     success: CheckoutOwnershipWait,
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.cancelWait, {
     payload: Schema.Struct({
@@ -85,8 +105,8 @@ export const WorkspaceExecutionRpcGroup = RpcGroup.make(
       commandId: CommandId,
       waitId: TrimmedNonEmptyString,
     }),
-    success: CheckoutOwnershipWait,
-    error: WorkspaceExecutionRequestError,
+    success: cancelledWait,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.request, {
     payload: Schema.Struct({
@@ -95,35 +115,35 @@ export const WorkspaceExecutionRpcGroup = RpcGroup.make(
       sourceRunId: Schema.optionalKey(RunId),
     }),
     success: VerificationRecord,
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.cancel, {
     payload: Schema.Struct({ verificationId: TrimmedNonEmptyString, commandId: CommandId }),
     success: VerificationRecord,
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.get, {
     payload: verificationInput,
     success: Schema.NullOr(VerificationRecord),
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.latest, {
     payload: threadInput,
     success: Schema.NullOr(VerificationRecord),
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
   Rpc.make(WORKSPACE_EXECUTION_METHODS.output, {
     payload: Schema.Struct({
       verificationId: TrimmedNonEmptyString,
       referenceId: TrimmedNonEmptyString,
-      offset: NonNegativeInt,
+      offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(VERIFICATION_MAX_OUTPUT_BYTES)),
       limit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65_536 })),
     }),
     success: Schema.Struct({
-      text: Schema.String,
+      text: Schema.String.check(Schema.isMaxLength(65_536)),
       truncated: Schema.Boolean,
       nextOffset: Schema.NullOr(NonNegativeInt),
     }),
-    error: WorkspaceExecutionRequestError,
+    error: workspaceError,
   }),
 ).middleware(RpcScopeAuthorization);

@@ -18,10 +18,10 @@ export type WorkspaceOwnershipPolicy = typeof WorkspaceOwnershipPolicy.Type;
 export const CheckoutIdentity = Schema.Struct({
   environmentId: EnvironmentId,
   checkoutKey: TrimmedNonEmptyString,
-  canonicalCwd: TrimmedNonEmptyString,
+  canonicalCwd: Schema.String.check(Schema.isMinLength(1)),
   filesystemIdentity: Schema.Struct({ device: TrimmedNonEmptyString, file: TrimmedNonEmptyString }),
-  gitDir: Schema.NullOr(TrimmedNonEmptyString),
-  gitCommonDir: Schema.NullOr(TrimmedNonEmptyString),
+  gitDir: Schema.NullOr(Schema.String.check(Schema.isMinLength(1))),
+  gitCommonDir: Schema.NullOr(Schema.String.check(Schema.isMinLength(1))),
 });
 export type CheckoutIdentity = typeof CheckoutIdentity.Type;
 

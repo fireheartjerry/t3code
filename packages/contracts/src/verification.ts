@@ -18,12 +18,16 @@ export const VERIFICATION_MAX_FILES = 100_000;
 export const VERIFICATION_MAX_BYTES = 2_147_483_648;
 export const VERIFICATION_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-export const VerificationInputPattern = TrimmedNonEmptyString.check(
+export const VerificationInputPattern = Schema.String.check(Schema.isMinLength(1)).check(
   Schema.makeFilter(
     (value: string) =>
       !value.includes("\0") &&
+      !/[{}\[\]]/.test(value) &&
       !/^(?:[\\/]|[A-Za-z]:)/.test(value) &&
-      !value.replaceAll("\\", "/").split("/").includes(".."),
+      !value
+        .replaceAll("\\", "/")
+        .split("/")
+        .some((part) => part === ".." || part === "." || part === ""),
     { expected: "a relative input pattern without parent traversal" },
   ),
 );
@@ -45,7 +49,7 @@ export const VerificationConfig = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(VERIFICATION_DEFAULT_TIMEOUT_MS)),
   ),
   inputs: Schema.Struct({
-    include: Schema.Array(VerificationInputPattern),
+    include: Schema.Array(VerificationInputPattern).check(Schema.isMinLength(1)),
     exclude: Schema.Array(VerificationInputPattern),
     nonGit: Schema.Literals(["fingerprint", "unsupported"]),
   }),
@@ -95,7 +99,7 @@ export const VerificationActionSnapshot = Schema.Struct({
   revision: TrimmedNonEmptyString,
   command: TrimmedNonEmptyString,
   shell: TrimmedNonEmptyString,
-  cwd: TrimmedNonEmptyString,
+  cwd: Schema.String.check(Schema.isMinLength(1)),
   timeoutMs: VerificationTimeout,
 });
 export type VerificationActionSnapshot = typeof VerificationActionSnapshot.Type;
@@ -103,7 +107,7 @@ export type VerificationActionSnapshot = typeof VerificationActionSnapshot.Type;
 export const VerificationOutputReference = Schema.Struct({
   id: TrimmedNonEmptyString,
   kind: Schema.Literals(["stdout", "stderr", "diagnostic"]),
-  bytes: NonNegativeInt,
+  bytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(VERIFICATION_MAX_OUTPUT_BYTES)),
 });
 export type VerificationOutputReference = typeof VerificationOutputReference.Type;
 
@@ -129,22 +133,57 @@ export const VerificationRecord = Schema.Struct({
   startMutationGeneration: Schema.NullOr(NonNegativeInt),
   endMutationGeneration: Schema.NullOr(NonNegativeInt),
   observationState: Schema.Literals(["continuous", "gap", "unavailable"]),
-  outputReferences: Schema.Array(VerificationOutputReference),
+  outputReferences: Schema.Array(VerificationOutputReference).check(Schema.isMaxLength(16)),
   truncated: Schema.Boolean,
-});
+}).check(
+  Schema.makeFilter(
+    (record) =>
+      record.execution !== "passed" ||
+      record.currentness !== "Current" ||
+      verificationMayClaimCurrentPass(record),
+    { expected: "complete, unchanged execution evidence for a current pass" },
+  ),
+);
 export type VerificationRecord = typeof VerificationRecord.Type;
 
-export function verificationMayClaimCurrentPass(
-  record: Pick<
-    VerificationRecord,
-    "execution" | "currentness" | "startSource" | "endSource" | "observationState"
-  >,
-): boolean {
+export function verificationMayClaimCurrentPass(record: {
+  readonly execution: VerificationExecution;
+  readonly currentness: VerificationCurrentness;
+  readonly startSource: SourceIdentity | null;
+  readonly endSource: SourceIdentity | null;
+  readonly observationState: "continuous" | "gap" | "unavailable";
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly startMutationGeneration: number | null;
+  readonly endMutationGeneration: number | null;
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
+}): boolean {
+  const start = record.startSource;
+  const end = record.endSource;
+  if (start === null || end === null) return false;
   return (
     record.execution === "passed" &&
     record.currentness === "Current" &&
     record.observationState === "continuous" &&
-    record.startSource?.coverage.complete === true &&
-    record.endSource?.coverage.complete === true
+    record.exitCode === 0 &&
+    record.signal === null &&
+    record.startedAt !== null &&
+    record.finishedAt !== null &&
+    record.startMutationGeneration !== null &&
+    record.startMutationGeneration === record.endMutationGeneration &&
+    start.coverage.complete &&
+    end.coverage.complete &&
+    start.coverage.gaps.length === 0 &&
+    end.coverage.gaps.length === 0 &&
+    start.coverage.policyRevision === end.coverage.policyRevision &&
+    start.checkoutIdentity.environmentId === end.checkoutIdentity.environmentId &&
+    start.checkoutIdentity.checkoutKey === end.checkoutIdentity.checkoutKey &&
+    start.digest === end.digest &&
+    start.head === end.head &&
+    start.branch === end.branch &&
+    start.indexDigest === end.indexDigest &&
+    start.configRevision === end.configRevision &&
+    start.toolchainRevision === end.toolchainRevision
   );
 }
