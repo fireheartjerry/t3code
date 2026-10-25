@@ -39,4 +39,4 @@ Touching the other side's area: keep it minimal, say so in the PR body. Contract
 
 ## Active status
 
-- `mac/server`: additive checkout ownership and verification contracts ready; server admission and evidence integration in progress.
+- `mac/server`: checkout admission and verification evidence implemented; contracts PR #3 precedes server integration. Focused checks: 634 tests pass. Native observation and descendant liveness remain conservative; no rollout or installation performed.
