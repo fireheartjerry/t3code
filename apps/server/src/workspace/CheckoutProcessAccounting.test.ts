@@ -17,6 +17,23 @@ const parent = { id: "parent", creationMarker: "parent-start", pid: 1 };
 const child = { id: "child", creationMarker: "child-start", pid: 2 };
 
 describe("checkout process accounting", () => {
+  it.effect("does not merge owners whose identifiers contain delimiters", () =>
+    Effect.gen(function* () {
+      const accounting = yield* Accounting.CheckoutProcessAccounting;
+      const first = {
+        ...handle,
+        owner: { kind: "run" as const, threadId: ThreadId.make("a:b"), runId: RunId.make("c") },
+      };
+      const other = {
+        kind: "run" as const,
+        threadId: ThreadId.make("a"),
+        runId: RunId.make("b:c"),
+      };
+      yield* accounting.register({ handle: first, processRef: parent, kind: "provider" });
+      yield* accounting.mark({ owner: first.owner, processRef: parent, state: "stopped" });
+      assert.strictEqual((yield* accounting.observe(other)).state, "unknown");
+    }).pipe(Effect.provide(Accounting.layer)),
+  );
   it.effect("retains a live descendant after its parent finishes", () =>
     Effect.gen(function* () {
       const accounting = yield* Accounting.CheckoutProcessAccounting;

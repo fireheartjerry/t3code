@@ -70,24 +70,18 @@ const encodeWait = Schema.encodeSync(waiterJson);
 const decodeHandle = Schema.decodeUnknownSync(Schema.fromJsonString(OwnershipHandle));
 const encodeReceipt = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const isStaleOwnershipHandle = Schema.is(StaleOwnershipHandle);
+const encodeOwnerKey = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
 export const ownerKey = (owner: OwnershipOwner): string =>
-  `${owner.kind}:${owner.threadId}:${owner.kind === "run" ? owner.runId : owner.kind === "terminal" ? owner.terminalId : owner.verificationId}`;
-
-export function ownershipHandleMatches(
-  record: CheckoutOwnershipRecord | null,
-  handle: OwnershipHandle,
-): boolean {
-  return (
-    record !== null &&
-    record.state === "held" &&
-    record.identity.checkoutKey === handle.checkoutKey &&
-    record.handle.ownershipId === handle.ownershipId &&
-    record.handle.generation === handle.generation &&
-    record.handle.serverInstanceId === handle.serverInstanceId &&
-    ownerKey(record.handle.owner) === ownerKey(handle.owner)
-  );
-}
+  encodeOwnerKey([
+    owner.kind,
+    owner.threadId,
+    owner.kind === "run"
+      ? owner.runId
+      : owner.kind === "terminal"
+        ? owner.terminalId
+        : owner.verificationId,
+  ]);
 
 export class CheckoutOwnershipStore extends Context.Service<
   CheckoutOwnershipStore,
