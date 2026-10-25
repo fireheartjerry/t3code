@@ -1,11 +1,43 @@
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { type ThreadTools, waitForRun } from "./thread.ts";
+import { type ThreadTools, waitForRun, workspaceThreadOperation } from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
+
+it.effect("reading verification evidence never asks the server to execute a check", () =>
+  Effect.gen(function* () {
+    const evidence = {
+      verificationId: "attempt",
+      execution: "failed",
+      currentness: "Stale",
+      endSource: { digest: "tested-source" },
+    };
+    const { tools, calls } = scriptedTools({ get_thread_verification: [evidence] });
+    expect(yield* workspaceThreadOperation(tools, { operation: "verification", threadId })).toEqual(
+      evidence,
+    );
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0]?.tool, "get_thread_verification");
+  }),
+);
+
+it.effect("explicit CLI verification carries an idempotency ID without supplying a command", () =>
+  Effect.gen(function* () {
+    const evidence = { verificationId: "attempt", execution: "queued", currentness: "Unknown" };
+    const { tools, calls } = scriptedTools({ verify_thread: [evidence] });
+    expect(
+      yield* workspaceThreadOperation(tools, {
+        operation: "verify",
+        threadId,
+        clientRequestId: "requested-check",
+      }),
+    ).toEqual(evidence);
+    assert.deepStrictEqual(calls[0]?.args, { threadId, clientRequestId: "requested-check" });
+  }),
+);
 
 /** Answers each tool call with the next scripted response for that tool. */
 const scriptedTools = (script: Record<string, Array<unknown>>) => {

@@ -99,6 +99,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  WorkspaceExecutionRpcGroup,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -118,6 +119,7 @@ import * as CommandOutputHub from "./orchestration-v2/CommandOutputHub.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
+import * as WorkspaceExecutionRpc from "./workspace/WorkspaceExecutionRpc.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
@@ -552,7 +554,9 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
-const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const ServerWsRpcGroup = WsRpcGroup.merge(WorkspaceExecutionRpcGroup).middleware(
+  RpcInstrumentation,
+);
 
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
@@ -1893,7 +1897,9 @@ export const layerWsRpc = (
         return result;
       });
 
+      const workspaceExecutionHandlers = yield* WorkspaceExecutionRpc.makeHandlers;
       const handlers = ServerWsRpcGroup.of({
+        ...workspaceExecutionHandlers,
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,

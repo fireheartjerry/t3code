@@ -29,6 +29,7 @@ import {
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  WORKSPACE_EXECUTION_REQUIRED_SCOPES,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -214,6 +215,11 @@ export const RPC_REQUIRED_SCOPES = {
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
+  if (Object.hasOwn(WORKSPACE_EXECUTION_REQUIRED_SCOPES, method)) {
+    return WORKSPACE_EXECUTION_REQUIRED_SCOPES[
+      method as keyof typeof WORKSPACE_EXECUTION_REQUIRED_SCOPES
+    ][0];
+  }
   if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
