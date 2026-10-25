@@ -12,8 +12,10 @@ import * as Schema from "effect/Schema";
 import { WorkspaceExecutionApi } from "./WorkspaceExecutionApi.ts";
 
 const decodeConflict = Schema.decodeUnknownOption(OwnershipConflict);
+const isRequestError = Schema.is(WorkspaceExecutionRequestError);
 
 export function workspaceExecutionError(cause: unknown): WorkspaceExecutionRequestError {
+  if (isRequestError(cause)) return cause;
   if (Predicate.hasProperty(cause, "conflict")) {
     const conflict = decodeConflict(cause.conflict);
     if (Option.isSome(conflict))
