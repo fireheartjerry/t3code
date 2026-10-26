@@ -1,18 +1,21 @@
 # Super T3 coordination (fireheartjerry/t3code)
 
 ## Purpose
+
 This fork is Jerry's custom T3 Code ("super T3"). The Mac Codex and the Windows Codex edit it in parallel on separate branches and merge small PRs into one integration branch, `custom/main`. `main` mirrors nothing in particular; `upstream` = pingdotgg/t3code.
 
 ## Branches and ownership
-| Branch | Owner | Scope |
-|---|---|---|
-| `custom/main` | integration (both, via PR only) | Base: upstream `7bafc40c` + our merged PRs |
-| `mac/server` | MacBook Codex | `apps/server` orchestration features: checkout ownership + verification evidence (spec on the Mac: `~/Documents/Codex/2026-10-25/you-are-on-my-macbook-jerrys/outputs/2026-10-25-t3-verification-evidence-and-checkout-ownership-spec.md`), plus `packages/contracts` changes those need |
-| `win/ui` | Windows (FIREHPC) Codex | `apps/web`, `apps/desktop` UI, the mint-dark theme (source: Mac `.../outputs/mint-dark.json`), installer and Windows-specific fixes |
+
+| Branch        | Owner                           | Scope                                                                                                                                                                                                                                                                                    |
+| ------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `custom/main` | integration (both, via PR only) | Base: upstream `7bafc40c` + our merged PRs                                                                                                                                                                                                                                               |
+| `mac/server`  | MacBook Codex                   | `apps/server` orchestration features: checkout ownership + verification evidence (spec on the Mac: `~/Documents/Codex/2026-10-25/you-are-on-my-macbook-jerrys/outputs/2026-10-25-t3-verification-evidence-and-checkout-ownership-spec.md`), plus `packages/contracts` changes those need |
+| `win/ui`      | Windows (FIREHPC) Codex         | `apps/web`, `apps/desktop` UI, the mint-dark theme (source: Mac `.../outputs/mint-dark.json`), installer and Windows-specific fixes                                                                                                                                                      |
 
 Touching the other side's area: keep it minimal, say so in the PR body. Contract (`packages/contracts`) changes go in their own small PR first so the other side can rebase onto them.
 
 ## Rules
+
 1. Small PRs into `custom/main` only. Never push directly to `custom/main`. Merge with `gh pr merge --squash`.
 2. Before every PR: `git fetch origin && git rebase origin/custom/main`.
 3. Upstream sync: once a week the Mac owner runs `git fetch upstream && git checkout custom/main && git merge upstream/main`, resolves conflicts, opens it as a PR (`sync/upstream-YYYY-MM-DD`). Never rebase `custom/main`.
@@ -28,7 +31,12 @@ Touching the other side's area: keep it minimal, say so in the PR body. Contract
 8. Conventional commit titles, e.g. `feat(server): checkout ownership records`.
 
 ## Testing without touching the installed T3
+
 - Dev: `vp run dev` (server + web) in the repo; state lives in `<repo>/.t3`. For realistic data, stop the dev server and run `vp run migrate-dev-db` (read-only snapshot copy of the real DB).
 - Desktop: `vp run dev:desktop`, or `vp run build:desktop` and run the built output from the repo. Do not install it over the real app, and do not overwrite `/Applications/T3 Code.app` or the Windows install.
 - Different port from the live T3 (3773) is chosen by the dev runner; check its output.
 - Shipping a custom build to the real app is a separate, explicit step Jerry approves.
+
+## Active status
+
+- `mac/server`: additive checkout ownership and verification contracts ready; server admission and evidence integration in progress.
