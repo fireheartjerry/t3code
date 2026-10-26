@@ -1,3 +1,4 @@
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointScopeId,
@@ -746,78 +747,101 @@ it("does not carry interrupted or still-running child ownership into later attem
   assert.isFalse(RunExecutionService.routeProviderEvent(lateChildNode, identity, state)[0]);
 });
 
-it.effect("rechecks run ownership immediately before calling the provider", () =>
-  Effect.gen(function* () {
-    const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
-    const guardCalls = yield* Ref.make(0);
-    const providerStarts = yield* Ref.make(0);
-    const threadId = ThreadId.make("thread:run-execution-start-guard");
-    const runId = RunId.make("run:run-execution-start-guard");
-    const attemptId = RunAttemptId.make("attempt:run-execution-start-guard");
-    const providerThreadId = ProviderThreadId.make("provider-thread:run-execution-start-guard");
-    const providerInstanceId = ProviderInstanceId.make("codex");
-    const providerSessionId = ProviderSessionId.make("session:run-execution-start-guard");
-    const rootNodeId = NodeId.make("node:run-execution-start-guard");
-    const run = {
-      id: runId,
-      threadId,
-      ordinal: 1,
-      providerInstanceId,
-    } as OrchestrationV2Run;
-    const rootNode = { id: rootNodeId } as OrchestrationV2ExecutionNode;
-    const providerThread = {
-      id: providerThreadId,
-      driver,
-    } as OrchestrationV2ProviderThread;
-    const attempt = {
-      id: attemptId,
-      providerTurnId: null,
-    } as OrchestrationV2RunAttempt;
-    const session = {
-      events: Stream.never,
-      startTurn: () => Ref.update(providerStarts, (count) => count + 1),
-    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+it.effect.each([false, true])(
+  "rechecks run ownership before the provider and keeps interrupted ingestion unproved (subscribed=%s)",
+  (subscribed) => {
+    const drains: boolean[] = [];
+    const admissionLayer = Layer.effect(
+      CheckoutAdmission.CheckoutAdmission,
+      Effect.map(CheckoutAdmission.CheckoutAdmission, (admission) => ({
+        ...admission,
+        providerDrained: (input) =>
+          Effect.sync(() => {
+            drains.push(input.observedStopped);
+          }),
+      })),
+    );
+    return Effect.gen(function* () {
+      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+      const guardCalls = yield* Ref.make(0);
+      const ingestionReady = yield* Deferred.make<void>();
+      const providerStarts = yield* Ref.make(0);
+      const threadId = ThreadId.make("thread:run-execution-start-guard");
+      const runId = RunId.make("run:run-execution-start-guard");
+      const attemptId = RunAttemptId.make("attempt:run-execution-start-guard");
+      const providerThreadId = ProviderThreadId.make("provider-thread:run-execution-start-guard");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const providerSessionId = ProviderSessionId.make("session:run-execution-start-guard");
+      const rootNodeId = NodeId.make("node:run-execution-start-guard");
+      const run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+      } as OrchestrationV2Run;
+      const rootNode = { id: rootNodeId } as OrchestrationV2ExecutionNode;
+      const providerThread = {
+        id: providerThreadId,
+        driver,
+      } as OrchestrationV2ProviderThread;
+      const attempt = {
+        id: attemptId,
+        providerTurnId: null,
+      } as OrchestrationV2RunAttempt;
+      const session = {
+        events: Stream.fromEffect(Deferred.succeed(ingestionReady, undefined)).pipe(
+          Stream.flatMap(() => Stream.never),
+        ),
+        hasPendingBackgroundWork: Effect.succeed(false),
+        startTurn: () => Ref.update(providerStarts, (count) => count + 1),
+      } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
 
-    yield* runExecution.startRootRun({
-      commandId: CommandId.make("command:run-execution-start-guard"),
-      appThread: rootAppThread(threadId),
-      providerSessionId,
-      session,
-      run,
-      rootNode,
-      checkpointScope: {
-        id: CheckpointScopeId.make("checkpoint-scope:run-execution-start-guard"),
-      } as OrchestrationV2CheckpointScope,
-      providerThread,
-      attempt,
-      attemptId,
-      providerTurnOrdinal: 1,
-      shouldStartProviderTurn: () =>
-        Ref.modify(guardCalls, (calls) => [calls === 0, calls + 1] as const),
-      message: {
-        messageId: MessageId.make("message:run-execution-start-guard"),
-        text: "Do not start after ownership changes.",
-        attachments: [],
-        createdBy: "user",
-        creationSource: "web",
-      },
-      modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
-      runtimePolicy: {
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-        approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "readOnly",
-          access: { type: "fullAccess" },
-          networkAccess: false,
+      yield* runExecution.startRootRun({
+        commandId: CommandId.make("command:run-execution-start-guard"),
+        appThread: rootAppThread(threadId),
+        providerSessionId,
+        session,
+        run,
+        rootNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make("checkpoint-scope:run-execution-start-guard"),
+        } as OrchestrationV2CheckpointScope,
+        providerThread,
+        attempt,
+        attemptId,
+        providerTurnOrdinal: 1,
+        shouldStartProviderTurn: () =>
+          Effect.gen(function* () {
+            const calls = yield* Ref.getAndUpdate(guardCalls, (calls) => calls + 1);
+            if (calls > 0 && subscribed) yield* Deferred.await(ingestionReady);
+            return calls === 0;
+          }),
+        message: {
+          messageId: MessageId.make("message:run-execution-start-guard"),
+          text: "Do not start after ownership changes.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
         },
-      },
-    });
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "readOnly",
+            access: { type: "fullAccess" },
+            networkAccess: false,
+          },
+        },
+      });
 
-    assert.equal(yield* Ref.get(guardCalls), 2);
-    assert.equal(yield* Ref.get(providerStarts), 0);
-  }).pipe(Effect.provide(layerRunExecutionTest)),
+      assert.equal(yield* Ref.get(guardCalls), 2);
+      assert.equal(yield* Ref.get(providerStarts), 0);
+      assert.deepEqual(drains, subscribed ? [false] : []);
+    }).pipe(Effect.provide(layerRunExecutionTest.pipe(Layer.provide(admissionLayer))));
+  },
 );
 
 it.effect("passes the thread's MCP app context to the provider under a safe key", () =>

@@ -11,6 +11,7 @@ import {
 } from "./auth.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS } from "./rpc.ts";
+import { WORKSPACE_EXECUTION_REQUIRED_SCOPES } from "./workspaceExecutionRpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
@@ -62,6 +63,11 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (Object.hasOwn(WORKSPACE_EXECUTION_REQUIRED_SCOPES, method)) {
+    return WORKSPACE_EXECUTION_REQUIRED_SCOPES[
+      method as keyof typeof WORKSPACE_EXECUTION_REQUIRED_SCOPES
+    ];
+  }
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {
     const payload = decodePrepareThread(input);
     if (payload.mode === "worktree" && payload.threadId !== undefined)

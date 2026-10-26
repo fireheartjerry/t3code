@@ -2,6 +2,7 @@ import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
@@ -113,6 +114,17 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly setupUncertain?: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
+  readonly setupUnstartedCompleted?: (input: {
+    readonly threadId: ThreadId;
+    readonly setupTerminalId: string;
+  }) => Effect.Effect<void>;
+  readonly admit?: (
+    input: CheckoutAdmission.RunAdmissionInput,
+  ) => Effect.Effect<null, CheckoutAdmission.CheckoutAdmissionError>;
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -170,6 +182,23 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
+    options.admit === undefined &&
+      options.setupUnstartedCompleted === undefined &&
+      options.setupUncertain === undefined
+      ? Layer.empty
+      : Layer.effect(
+          CheckoutAdmission.CheckoutAdmission,
+          Effect.map(CheckoutAdmission.CheckoutAdmission, (admission) => ({
+            ...admission,
+            ...(options.admit === undefined ? {} : { admit: options.admit }),
+            ...(options.setupUncertain === undefined
+              ? {}
+              : { setupUncertain: options.setupUncertain }),
+            ...(options.setupUnstartedCompleted === undefined
+              ? {}
+              : { setupUnstartedCompleted: options.setupUnstartedCompleted }),
+          })),
+        ),
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
@@ -304,6 +333,99 @@ function launchInput(input: {
     creationSource: "web" as const,
   };
 }
+
+it.effect.each(["root", "existing_worktree", "worktree"] as const)(
+  "settles empty %s preparation with proof only when no mutating process was launched",
+  (strategy) =>
+    Effect.gen(function* () {
+      const completed = yield* Deferred.make<{
+        readonly threadId: ThreadId;
+        readonly setupTerminalId: string;
+        readonly state: "unstarted" | "unknown";
+      }>();
+      const harness = makeHarness({
+        setupUnstartedCompleted: (input) =>
+          Deferred.succeed(completed, { ...input, state: "unstarted" as const }).pipe(
+            Effect.asVoid,
+          ),
+        setupUncertain: (input) =>
+          Deferred.succeed(completed, { ...input, state: "unknown" as const }).pipe(Effect.asVoid),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const launched = yield* launches.launch(
+          launchInput({
+            command: "empty-setup",
+            thread: "empty-thread",
+            workspace:
+              strategy === "root"
+                ? { type: "root" }
+                : strategy === "existing_worktree"
+                  ? { type: "existing_worktree", worktreePath: "/existing" }
+                  : { type: "worktree", baseRef: "main", startFromOrigin: false },
+          }),
+        );
+        assert.deepEqual(yield* Deferred.await(completed), {
+          threadId: launched.threadId,
+          setupTerminalId: "setup-empty-setup",
+          state: strategy === "worktree" ? "unknown" : "unstarted",
+        });
+        assert.equal(harness.runSetup.mock.calls.length, strategy === "root" ? 0 : 1);
+        const projection =
+          yield* (yield* ThreadManagement.ThreadManagementService).getThreadProjection(
+            launched.threadId,
+          );
+        assert.equal(projection.runs.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
+
+it.effect.each(["root", "existing_worktree", "worktree"] as const)(
+  "blocks %s preparation before setup and branch rename when checkout admission fails",
+  (strategy) => {
+    const admitted: string[] = [];
+    const harness = makeHarness({
+      admit: (input) =>
+        Effect.gen(function* () {
+          admitted.push(input.cwd);
+          return yield* new CheckoutAdmission.CheckoutAdmissionError({ threadId: input.threadId });
+        }),
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: `admission:${strategy}`,
+          thread: `thread:${strategy}`,
+          message: "Prepare",
+          workspace:
+            strategy === "root"
+              ? { type: "root" }
+              : strategy === "existing_worktree"
+                ? { type: "existing_worktree", worktreePath: "/existing" }
+                : { type: "worktree", baseRef: "main", startFromOrigin: false },
+        }),
+      );
+      yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "run.updated" && stored.event.payload.status === "failed",
+        ),
+        Stream.runHead,
+      );
+      assert.deepEqual(admitted, [
+        strategy === "root"
+          ? "/repo"
+          : strategy === "existing_worktree"
+            ? "/existing"
+            : "/repo-worktrees/feature",
+      ]);
+      assert.equal(harness.runSetup.mock.calls.length, 0);
+      assert.equal(harness.renameBranch.mock.calls.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>

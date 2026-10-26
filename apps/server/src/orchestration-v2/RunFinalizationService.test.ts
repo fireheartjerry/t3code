@@ -11,6 +11,7 @@ import * as Layer from "effect/Layer";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RunFinalization from "./RunFinalizationService.ts";
@@ -23,6 +24,17 @@ it.effect("completes finalization when the post-checkpoint workspace refresh fai
   const layer = RunFinalization.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Layer.effect(
+          CheckoutAdmission.CheckoutAdmission,
+          Effect.map(CheckoutAdmission.CheckoutAdmission, (admission) => ({
+            ...admission,
+            finalized: (input) =>
+              Effect.sync(() => {
+                assert.deepStrictEqual(input, { threadId, runId, checkpointRef: null });
+                captured.push("ownership-finalized");
+              }),
+          })),
+        ),
         Layer.mock(CheckpointCapture.CheckpointCaptureServiceV2)({
           execute: () =>
             Effect.sync(() => {
@@ -54,7 +66,7 @@ it.effect("completes finalization when the post-checkpoint workspace refresh fai
   return Effect.gen(function* () {
     const service = yield* RunFinalization.RunFinalizationService;
     yield* service.finalize({ threadId, runId, scopeId });
-    assert.deepEqual(captured, ["checkpoint", "refresh"]);
+    assert.deepEqual(captured, ["checkpoint", "ownership-finalized", "refresh"]);
   }).pipe(Effect.provide(layer));
 });
 

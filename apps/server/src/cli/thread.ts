@@ -11,6 +11,9 @@ import {
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadStatus,
   type OrchestratorMcpThreadTimelineItem,
+  CheckoutOwnershipRecord,
+  CheckoutOwnershipWait,
+  VerificationRecord,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
@@ -31,6 +34,7 @@ import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { formatVerificationLegacySummary } from "../verification/VerificationLegacySummary.ts";
 
 /**
  * Short enough that a run which stops to ask the user something is noticed
@@ -699,6 +703,126 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+type WorkspaceThreadOperation =
+  | "workspace"
+  | "wait-workspace"
+  | "cancel-workspace-wait"
+  | "verify"
+  | "verification"
+  | "cancel-verification";
+
+export const workspaceThreadOperation = Effect.fn("cli.thread.workspaceOperation")(function* (
+  tools: ThreadTools,
+  input: {
+    readonly operation: WorkspaceThreadOperation;
+    readonly threadId: ThreadId;
+    readonly id?: string;
+    readonly clientRequestId?: string;
+  },
+) {
+  const target = {
+    threadId: input.threadId,
+    ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
+  };
+  switch (input.operation) {
+    case "workspace":
+      return yield* tools.call(
+        "inspect_thread_workspace",
+        target,
+        Schema.NullOr(CheckoutOwnershipRecord),
+      );
+    case "wait-workspace":
+      return yield* tools.call("wait_for_thread_workspace", target, CheckoutOwnershipWait);
+    case "verify":
+      return yield* tools.call("verify_thread", target, VerificationRecord);
+    case "verification":
+      return yield* tools.call(
+        "get_thread_verification",
+        target,
+        Schema.NullOr(VerificationRecord),
+      );
+    case "cancel-workspace-wait":
+      if (!input.id)
+        return yield* new ThreadUsageError({ detail: "Pass the checkout wait ID to cancel." });
+      return yield* tools.call(
+        "cancel_workspace_wait",
+        { ...target, waitId: input.id },
+        Schema.NullOr(CheckoutOwnershipWait),
+      );
+    case "cancel-verification":
+      return yield* tools.call(
+        "cancel_thread_verification",
+        { ...target, ...(input.id === undefined ? {} : { verificationId: input.id }) },
+        Schema.NullOr(VerificationRecord),
+      );
+  }
+});
+
+function workspaceCommand(name: WorkspaceThreadOperation, description: string) {
+  return Command.make(name, {
+    ...projectLocationFlags,
+    thread: threadArgument,
+    json: jsonFlag,
+    id: Flag.String("id").pipe(Flag.optional),
+    requestId: Flag.String("request-id").pipe(Flag.optional),
+  }).pipe(
+    Command.withDescription(description),
+    Command.withHandler((flags) =>
+      Effect.gen(function* () {
+        const threadId = yield* decodeThreadId(flags.thread);
+        yield* withThreadTools(
+          flags,
+          Effect.fn("cli.thread.workspaceCommand")(function* (tools) {
+            const result = yield* workspaceThreadOperation(tools, {
+              operation: name,
+              threadId,
+              ...(Option.isSome(flags.id) ? { id: flags.id.value } : {}),
+              ...(Option.isSome(flags.requestId) ? { clientRequestId: flags.requestId.value } : {}),
+            });
+            if (flags.json) return yield* printJson(result);
+            if (result === null)
+              return yield* Console.log(
+                name === "workspace" ? "No active checkout owner." : "No verification evidence.",
+              );
+            if ("execution" in result)
+              return yield* Console.log(formatVerificationLegacySummary(result));
+            if ("waitId" in result)
+              return yield* Console.log(`Wait ${result.waitId}: ${result.state}`);
+            yield* Console.log(
+              `${result.identity.environmentId}  ${result.identity.canonicalCwd}\nOwner: ${result.handle.owner.threadId}  ${result.handle.operation}  ${result.state}`,
+            );
+          }),
+        );
+      }).pipe(reportThreadErrors),
+    ),
+  );
+}
+
+const threadWorkspaceCommand = workspaceCommand(
+  "workspace",
+  "Inspect the checkout owner without starting work.",
+);
+const threadWorkspaceWaitCommand = workspaceCommand(
+  "wait-workspace",
+  "Queue a durable checkout wait for a blocked thread.",
+);
+const threadWorkspaceCancelCommand = workspaceCommand(
+  "cancel-workspace-wait",
+  "Cancel a checkout wait using --id; admitted work uses normal stop.",
+);
+const threadVerifyCommand = workspaceCommand(
+  "verify",
+  "Queue only the project's configured verification action.",
+);
+const threadVerificationCommand = workspaceCommand(
+  "verification",
+  "Read recorded verification evidence without executing checks.",
+);
+const threadVerificationCancelCommand = workspaceCommand(
+  "cancel-verification",
+  "Cancel the latest verification, or select an attempt with --id.",
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
@@ -706,5 +830,11 @@ export const threadCommand = Command.make("thread").pipe(
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadWorkspaceCommand,
+    threadWorkspaceWaitCommand,
+    threadWorkspaceCancelCommand,
+    threadVerifyCommand,
+    threadVerificationCommand,
+    threadVerificationCancelCommand,
   ]),
 );

@@ -14,6 +14,9 @@ import {
   AuthTerminalOperateScope,
   WS_METHODS,
   WsRpcGroup,
+  WorkspaceExecutionRpcGroup,
+  WorkspaceExecutionRequestError,
+  CommandId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -121,6 +124,50 @@ describe("RPC scope middleware", () => {
       expect(
         yield* client[WS_METHODS.serverRetryResourceTelemetry]({}).pipe(Effect.flip),
       ).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: missing,
+      });
+      expect(handled).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("verification execution authorization", () => {
+  const group = WorkspaceExecutionRpcGroup.omit(
+    "workspaceOwnership.inspect",
+    "workspaceOwnership.wait",
+    "workspaceOwnership.cancelWait",
+    "verification.cancel",
+    "verification.get",
+    "verification.latest",
+    "verification.output",
+  );
+  it.effect.each([
+    { scopes: [AuthOrchestrationReadScope], missing: AuthOrchestrationOperateScope },
+    { scopes: [AuthOrchestrationOperateScope], missing: AuthTerminalOperateScope },
+    { scopes: [AuthTerminalOperateScope], missing: AuthOrchestrationOperateScope },
+  ])("blocks execution without $missing before any action can run", ({ scopes, missing }) =>
+    Effect.gen(function* () {
+      const handled: string[] = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(
+            group.toLayerHandler("verification.request", () =>
+              Effect.sync(() => handled.push("executed")).pipe(
+                Effect.andThen(
+                  Effect.fail(new WorkspaceExecutionRequestError({ reason: "unavailable" })),
+                ),
+              ),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+      const result = yield* client["verification.request"]({
+        threadId: ThreadId.make("thread"),
+        commandId: CommandId.make("verify"),
+      }).pipe(Effect.flip);
+      expect(result).toMatchObject({
         _tag: "EnvironmentAuthorizationError",
         requiredPermission: missing,
       });
