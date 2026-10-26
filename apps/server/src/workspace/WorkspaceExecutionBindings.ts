@@ -24,10 +24,6 @@ const make = Effect.gen(function* () {
   const events = yield* Events.EventSinkV2;
   const ids = yield* Ids.IdAllocatorV2;
 
-  // No capability or action reference is exported until both recovery boundaries have completed.
-  yield* recovery.reconcile().pipe(Effect.mapError(workspaceExecutionError));
-  yield* verification.recover().pipe(Effect.mapError(workspaceExecutionError));
-
   const observer: Context.Service.Shape<typeof VerificationEffects.VerificationResultObserver> = {
     publish: Effect.fn("WorkspaceExecutionBindings.publish")(
       function* (record) {
@@ -96,6 +92,15 @@ const make = Effect.gen(function* () {
         ),
     ),
   };
+  // No capability or action reference is exported until both recovery boundaries have completed.
+  yield* recovery.reconcile().pipe(Effect.mapError(workspaceExecutionError));
+  yield* verification
+    .recover()
+    .pipe(
+      Effect.provideService(VerificationEffects.VerificationResultObserver, observer),
+      Effect.mapError(workspaceExecutionError),
+    );
+
   // Provide the completed late context on each operation too: callers may own early-created services.
   const bound = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
     effect.pipe(Effect.provide(bindings));

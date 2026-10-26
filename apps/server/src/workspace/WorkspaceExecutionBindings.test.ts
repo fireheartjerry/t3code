@@ -88,6 +88,7 @@ const owner: CheckoutOwnershipRecord = {
 
 const fixture = Effect.fn("WorkspaceExecutionBindings.test.fixture")(function (
   options: {
+    readonly reconcile?: Effect.Effect<void, Recovery.CheckoutOwnershipRecoveryError>;
     readonly recover?: Effect.Effect<void, Verification.VerificationServiceError>;
     readonly fail?: boolean;
     readonly noticeFails?: boolean;
@@ -144,7 +145,10 @@ const fixture = Effect.fn("WorkspaceExecutionBindings.test.fixture")(function (
       retryPreparation: (input) => call("retry", input, {} as never),
     }),
     Layer.succeed(Recovery.CheckoutOwnershipRecovery, {
-      reconcile: () => call("reconcile", undefined, undefined),
+      reconcile: () =>
+        call("reconcile", undefined, undefined).pipe(
+          Effect.andThen(options.reconcile ?? Effect.void),
+        ),
     }),
     Layer.mock(Events.EventSinkV2)({
       commitCommand: (input) =>
@@ -240,27 +244,92 @@ it.effect("inspects independent active/idle ownership and omits released claims"
   }),
 );
 
-it.effect("does not advertise availability or execute actions before recovery completes", () =>
-  Effect.gen(function* () {
-    const recovering = yield* Deferred.make<void>();
-    const release = yield* Deferred.make<void>();
-    const ready = yield* Deferred.make<void>();
-    const f = yield* fixture({
-      recover: Deferred.succeed(recovering, undefined).pipe(
-        Effect.andThen(Deferred.await(release)),
-      ),
-    });
-    const build = yield* Effect.gen(function* () {
-      expect(yield* Api.WorkspaceExecutionAvailable).toBe(true);
-      yield* Deferred.succeed(ready, undefined);
-    }).pipe(Effect.provide(f.layer), Effect.forkChild);
-    yield* Deferred.await(recovering);
-    expect(yield* Api.WorkspaceExecutionAvailable).toBe(false);
-    expect(f.calls.map((call) => call.method)).toEqual(["reconcile", "recover"]);
-    yield* Deferred.succeed(release, undefined);
-    yield* Deferred.await(ready);
-    yield* Fiber.join(build);
-  }),
+it.effect(
+  "keeps recovery unavailable and publishes notices from recovered background attempts",
+  () =>
+    Effect.gen(function* () {
+      const workerScope = yield* Effect.scope;
+      const reconciling = yield* Deferred.make<void>();
+      const releaseReconcile = yield* Deferred.make<void>();
+      const recovering = yield* Deferred.make<void>();
+      const releaseRecovery = yield* Deferred.make<void>();
+      const completeAttempt = yield* Deferred.make<void>();
+      const attemptDone = yield* Deferred.make<void>();
+      const ready = yield* Deferred.make<void>();
+      const unavailable = Effect.gen(function* () {
+        expect(yield* Api.WorkspaceExecutionAvailable).toBe(false);
+        const result = yield* (yield* Api.WorkspaceExecutionApi)
+          .request({ commandId: record.commandId, threadId: record.threadId })
+          .pipe(Effect.result);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "WorkspaceExecutionRequestError", reason: "unavailable" },
+        });
+      });
+      const f = yield* fixture({
+        reconcile: Effect.gen(function* () {
+          yield* unavailable;
+          yield* Deferred.succeed(reconciling, undefined);
+          yield* Deferred.await(releaseReconcile);
+        }),
+        recover: Effect.gen(function* () {
+          yield* unavailable;
+          yield* Effect.gen(function* () {
+            yield* Deferred.await(completeAttempt);
+            yield* (yield* VerificationEffects.VerificationResultObserver).publish(record);
+            yield* Deferred.succeed(attemptDone, undefined);
+          }).pipe(Effect.forkIn(workerScope, { startImmediately: false }));
+          yield* Deferred.succeed(recovering, undefined);
+          yield* Deferred.await(releaseRecovery);
+        }),
+      });
+      const build = yield* Effect.gen(function* () {
+        expect(yield* Api.WorkspaceExecutionAvailable).toBe(true);
+        expect(
+          yield* (yield* Api.WorkspaceExecutionApi).request({
+            commandId: record.commandId,
+            threadId: record.threadId,
+          }),
+        ).toBe(record);
+        yield* Deferred.succeed(ready, undefined);
+        yield* Deferred.await(attemptDone);
+      }).pipe(Effect.provide(f.layer), Effect.forkChild);
+      yield* Deferred.await(reconciling);
+      expect(f.calls.map((call) => call.method)).toEqual(["reconcile"]);
+      yield* Deferred.succeed(releaseReconcile, undefined);
+      yield* Deferred.await(recovering);
+      yield* unavailable;
+      expect(f.calls.map((call) => call.method)).toEqual(["reconcile", "recover"]);
+      expect(f.notices).toHaveLength(0);
+      yield* Deferred.succeed(releaseRecovery, undefined);
+      yield* Deferred.await(ready);
+      expect(f.notices).toHaveLength(0);
+      yield* Deferred.succeed(completeAttempt, undefined);
+      yield* Deferred.await(attemptDone);
+      yield* Fiber.join(build);
+      expect(f.calls.map((call) => call.method)).toEqual([
+        "reconcile",
+        "recover",
+        "request",
+        "output",
+      ]);
+      expect(f.notices).toHaveLength(1);
+      expect(f.notices[0]).toMatchObject({
+        commandId: "verification-result:verification:failed:Unknown",
+        commandType: "verification.result-notice",
+        threadId: record.threadId,
+        events: [
+          {
+            type: "turn-item.updated",
+            payload: {
+              type: "system_notice",
+              status: "completed",
+              message: expect.stringContaining("FAIL: expected true"),
+            },
+          },
+        ],
+      });
+    }).pipe(Effect.scoped),
 );
 
 it.effect("publishes bounded legacy notices with stable per-outcome command IDs", () =>
@@ -305,18 +374,25 @@ it.effect(
 
 it.effect("normalizes recovery failures before publishing any availability context", () =>
   Effect.gen(function* () {
+    let advertised = false;
     const f = yield* fixture({
-      recover: Effect.fail(
-        new Verification.VerificationServiceError({
+      recover: Effect.gen(function* () {
+        expect(yield* Api.WorkspaceExecutionAvailable).toBe(false);
+        return yield* new Verification.VerificationServiceError({
           reason: "unavailable",
           cause: "secret-canary",
-        }),
-      ),
+        });
+      }),
     });
-    const error = yield* Effect.void.pipe(Effect.provide(f.layer), Effect.flip);
+    const error = yield* Effect.sync(() => {
+      advertised = true;
+    }).pipe(Effect.provide(f.layer), Effect.flip);
     expect(error).toMatchObject({ _tag: "WorkspaceExecutionRequestError", reason: "unavailable" });
     expect("cause" in error).toBe(false);
+    expect(advertised).toBe(false);
     expect(yield* Api.WorkspaceExecutionAvailable).toBe(false);
+    expect(f.calls.map((call) => call.method)).toEqual(["reconcile", "recover"]);
+    expect(f.notices).toHaveLength(0);
   }),
 );
 
