@@ -39,4 +39,9 @@ Touching the other side's area: keep it minimal, say so in the PR body. Contract
 
 ## Active status
 
-- `mac/server`: draft PR #4 now fixes recovery notice context and interrupted terminal startup cleanup, with deterministic regressions. Contracts PR #3 remains the dependency; native observation/process-tree proof and rollout gates remain conservative. No merge or installation performed.
+- 2026-10-25 merged state of `custom/main`: PR #3 (contracts, squash fe1e3aedd5), PR #4 (server checkout ownership + verification evidence, squash 32515384a3), PR #2 (Mint Dark web/desktop) merged. Native PTY/process-tree proof and rollout gates remain conservative follow-ups. Nothing installed into the real T3 app.
+- `mac/server`: PR #4 merged, including recovery notice-observer and interrupted terminal-startup cleanup fixes.
+
+## Windows UI status
+
+- 2026-10-25: win/ui adds Mint Dark for web/desktop, fixes dark-only startup selection, and preserves the supplied 61-color palette; PR verification notes cover Windows tooling limits. Root-clone dev must use an explicit --home-dir pointing at the repo .t3.
