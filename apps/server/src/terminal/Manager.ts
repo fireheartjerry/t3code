@@ -1530,7 +1530,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       admittedProcesses.delete(key);
     }
     yield* captured.admission
-      .terminalClosed({ threadId: captured.threadId, terminalId: captured.terminalId, confirmed })
+      .terminalClosed({
+        threadId: captured.threadId,
+        terminalId: captured.terminalId,
+        confirmed,
+        descendantsStopped: false,
+      })
       .pipe(Effect.provide(captured.context));
   });
 

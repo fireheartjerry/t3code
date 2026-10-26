@@ -88,6 +88,33 @@ const input = (name: string): Admission.RunAdmissionInput => ({
 });
 
 describe("CheckoutAdmissionLive", () => {
+  it.effect("retains descendant uncertainty when a PTY exits before its PID is registered", () =>
+    Effect.gen(function* () {
+      const admission = yield* Admission.CheckoutAdmission;
+      const store = yield* Store.CheckoutOwnershipStore;
+      const writer = {
+        ...input("partially-started"),
+        runId: null,
+        operation: "setup" as const,
+        setupTerminalId: "setup",
+      };
+      const handle = yield* admission.admit(writer);
+      yield* admission
+        .terminalOpen({ threadId: writer.threadId, terminalId: "setup", cwd: "/fixture" })
+        .pipe(Effect.provideService(Admission.ActiveCheckoutOwnership, handle));
+      yield* admission.terminalClosed({
+        threadId: writer.threadId,
+        terminalId: "setup",
+        confirmed: true,
+        descendantsStopped: false,
+      });
+      assert.strictEqual((yield* store.read(identity.checkoutKey))?.state, "uncertain");
+      assert.strictEqual(
+        (yield* admission.admit(input("competing")).pipe(Effect.flip))._tag,
+        "CheckoutAdmissionError",
+      );
+    }).pipe(Effect.provide(layer)),
+  );
   it.effect("preserves legacy off-policy respawn without forgetting unknown descendants", () =>
     Effect.gen(function* () {
       const settings = yield* Settings.ServerSettingsService;

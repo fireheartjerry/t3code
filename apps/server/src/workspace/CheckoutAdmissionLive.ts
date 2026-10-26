@@ -831,8 +831,11 @@ const make = Effect.gen(function* () {
     const key = terminalKey(input.threadId, input.terminalId);
     const terminal = terminals.get(key);
     if (terminal === undefined) return;
+    // A captured PTY may exit before terminalStarted records its PID.
     const stopped =
-      input.confirmed && (terminal.process === null || input.descendantsStopped === true);
+      input.confirmed &&
+      (input.descendantsStopped === true ||
+        (terminal.process === null && input.descendantsStopped === undefined));
     terminal.state = stopped ? "stopped" : "unknown";
     if (!stopped) terminal.activity.uncertain = true;
     yield* observeFailure(

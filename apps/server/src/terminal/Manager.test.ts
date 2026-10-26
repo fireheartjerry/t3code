@@ -612,7 +612,12 @@ it.layer(
       expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
       expect(process.killSignals).toEqual(["SIGTERM"]);
       expect(closed).toEqual([
-        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, confirmed: true },
+        {
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          confirmed: true,
+          descendantsStopped: false,
+        },
       ]);
       expect(process.exitListenerCount).toBe(0);
       expect(started).not.toHaveBeenCalled();
@@ -667,7 +672,12 @@ it.layer(
         expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
         expect(process.killSignals).toEqual(["SIGTERM"]);
         expect(closed).toEqual([
-          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, confirmed: true },
+          {
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            confirmed: true,
+            descendantsStopped: false,
+          },
         ]);
         expect(started).not.toHaveBeenCalled();
         expect((yield* getEvents).some((event) => event.type === "started")).toBe(false);
@@ -713,6 +723,7 @@ it.layer(
             threadId: "thread-1",
             terminalId: DEFAULT_TERMINAL_ID,
             confirmed: confirmsRootExit,
+            descendantsStopped: false,
           },
         ]);
         expect(process.exitListenerCount).toBe(0);
