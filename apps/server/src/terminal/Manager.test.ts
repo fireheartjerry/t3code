@@ -328,6 +328,33 @@ const createManager = (
     }),
   );
 
+const createManagerWithStateRef = Effect.fn("test.createManagerWithStateRef")(function* (
+  options: CreateManagerOptions = {},
+) {
+  const captured = yield* Deferred.make<SynchronizedRef.SynchronizedRef<unknown>>();
+  const make = vi.mocked(SynchronizedRef.make).getMockImplementation()!;
+  vi.mocked(SynchronizedRef.make).mockImplementationOnce((initial) =>
+    make(initial).pipe(Effect.tap((ref) => Deferred.succeed(captured, ref))),
+  );
+  const fixture = yield* createManager(5, options);
+  return { ...fixture, stateRef: yield* Deferred.await(captured) };
+});
+
+const holdManagerState = Effect.fn("test.holdManagerState")(function* (
+  stateRef: SynchronizedRef.SynchronizedRef<unknown>,
+  requested: Deferred.Deferred<void>,
+  locked: Deferred.Deferred<void>,
+  release: Deferred.Deferred<void>,
+) {
+  yield* Deferred.await(requested);
+  yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+    Deferred.succeed(locked, undefined).pipe(
+      Effect.andThen(Deferred.await(release)),
+      Effect.as([undefined, state] as const),
+    ),
+  );
+});
+
 const layerWithHostPlatform = (platform: NodeJS.Platform) =>
   Layer.succeed(HostProcess.Platform, platform);
 
@@ -478,6 +505,293 @@ it.layer(
       );
       expect(error._tag).toBe("TerminalWriteError");
       expect(ptyAdapter.spawnInputs).toHaveLength(0);
+    }),
+  );
+
+  it.effect("closes a known-unstarted reservation when open is interrupted before spawn", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, stateRef, getEvents } = yield* createManagerWithStateRef();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const requested = yield* Deferred.make<void>();
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const opened = yield* Deferred.make<void>();
+      yield* holdManagerState(stateRef, requested, locked, release).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      let reserved = false;
+      const closed: Parameters<typeof base.terminalClosed>[0][] = [];
+      const started = vi.fn(() => Effect.void);
+      const opening = yield* manager.open(openInput()).pipe(
+        Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+          ...base,
+          terminalOpen: () =>
+            Effect.gen(function* () {
+              reserved = true;
+              yield* Deferred.succeed(requested, undefined);
+              yield* Deferred.await(locked);
+              yield* Deferred.succeed(opened, undefined);
+            }),
+          terminalStarted: started,
+          terminalClosed: (input) =>
+            Effect.sync(() => {
+              closed.push(input);
+              if (input.confirmed) reserved = false;
+            }),
+        }),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(opened);
+      const cancelled = yield* Fiber.interrupt(opening).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(cancelled);
+      expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
+      expect(closed).toEqual([
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, confirmed: true },
+      ]);
+      expect(reserved).toBe(false);
+      expect(ptyAdapter.processes).toEqual([]);
+      expect(started).not.toHaveBeenCalled();
+      expect((yield* getEvents).some((event) => event.type === "started")).toBe(false);
+      const snapshots: TerminalAttachStreamEvent[] = [];
+      const stop = yield* manager.observeStream(openInput(), (event) =>
+        Effect.sync(() => snapshots.push(event)),
+      );
+      stop();
+      expect(snapshots[0]).toMatchObject({ snapshot: { status: "error", pid: null } });
+    }),
+  );
+
+  it.effect("stops the captured PTY when open is interrupted before manager publication", () =>
+    Effect.gen(function* () {
+      const requested = yield* Deferred.make<void>();
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const returning = yield* Deferred.make<void>();
+      class PublishingPtyAdapter extends FakePtyAdapter {
+        override spawn(input: PtyAdapter.PtySpawnInput) {
+          return super
+            .spawn(input)
+            .pipe(
+              Effect.tap(() =>
+                Deferred.succeed(requested, undefined).pipe(
+                  Effect.andThen(Deferred.await(locked)),
+                  Effect.andThen(Deferred.succeed(returning, undefined)),
+                ),
+              ),
+            );
+        }
+      }
+      const { manager, ptyAdapter, stateRef, getEvents } = yield* createManagerWithStateRef({
+        ptyAdapter: new PublishingPtyAdapter(),
+      });
+      yield* holdManagerState(stateRef, requested, locked, release).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const closed: Parameters<typeof base.terminalClosed>[0][] = [];
+      const started = vi.fn(() => Effect.void);
+      const opening = yield* manager.open(openInput()).pipe(
+        Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+          ...base,
+          terminalStarted: started,
+          terminalClosed: (input) => Effect.sync(() => closed.push(input)),
+        }),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(returning);
+      const process = ptyAdapter.processes[0]!;
+      process.onKill = () => process.emitExit({ exitCode: 0, signal: null });
+      const cancelled = yield* Fiber.interrupt(opening).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(cancelled);
+      expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+      expect(closed).toEqual([
+        { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, confirmed: true },
+      ]);
+      expect(process.exitListenerCount).toBe(0);
+      expect(started).not.toHaveBeenCalled();
+      expect((yield* getEvents).some((event) => event.type === "started")).toBe(false);
+    }),
+  );
+
+  it.effect.each([false, true])(
+    "captures an in-flight spawn before cancellation cleanup when manager scope closed is %s",
+    (closeManagerScope) =>
+      Effect.gen(function* () {
+        const spawned = yield* Deferred.make<void>();
+        const returnHandle = yield* Deferred.make<void>();
+        class ReturningPtyAdapter extends FakePtyAdapter {
+          override spawn(input: PtyAdapter.PtySpawnInput) {
+            return super
+              .spawn(input)
+              .pipe(
+                Effect.tap(() =>
+                  Deferred.succeed(spawned, undefined).pipe(
+                    Effect.andThen(Deferred.await(returnHandle)),
+                  ),
+                ),
+              );
+          }
+        }
+        const managerScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(managerScope, Exit.void));
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          ptyAdapter: new ReturningPtyAdapter(),
+        }).pipe(Effect.provideService(Scope.Scope, managerScope));
+        const base = yield* CheckoutAdmission.CheckoutAdmission;
+        const closed: Parameters<typeof base.terminalClosed>[0][] = [];
+        const started = vi.fn(() => Effect.void);
+        const opening = yield* manager.open(openInput()).pipe(
+          Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+            ...base,
+            terminalStarted: started,
+            terminalClosed: (input) => Effect.sync(() => closed.push(input)),
+          }),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.await(spawned);
+        const process = ptyAdapter.processes[0]!;
+        process.onKill = () => process.emitExit({ exitCode: 0, signal: null });
+        if (closeManagerScope) yield* Scope.close(managerScope, Exit.void);
+        const cancelled = yield* Fiber.interrupt(opening).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.succeed(returnHandle, undefined);
+        yield* Fiber.join(cancelled);
+        expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+        expect(closed).toEqual([
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, confirmed: true },
+        ]);
+        expect(started).not.toHaveBeenCalled();
+        expect((yield* getEvents).some((event) => event.type === "started")).toBe(false);
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "stops startup interrupted during terminalStarted when root exit confirmed is %s",
+    (confirmsRootExit) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager();
+        const base = yield* CheckoutAdmission.CheckoutAdmission;
+        const starting = yield* Deferred.make<void>();
+        const finishStarting = yield* Deferred.make<void>();
+        const closed: Parameters<typeof base.terminalClosed>[0][] = [];
+        const opening = yield* manager.open(openInput()).pipe(
+          Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+            ...base,
+            terminalStarted: () =>
+              Deferred.succeed(starting, undefined).pipe(
+                Effect.andThen(Deferred.await(finishStarting)),
+              ),
+            terminalClosed: (input) =>
+              Effect.gen(function* () {
+                expect(yield* HostProcess.HomeDirectory).toBe("/captured-terminal-home");
+                closed.push(input);
+              }),
+          }),
+          Effect.provideService(HostProcess.HomeDirectory, "/captured-terminal-home"),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.await(starting);
+        const process = ptyAdapter.processes[0]!;
+        process.onKill = () => {
+          if (confirmsRootExit) process.emitExit({ exitCode: 0, signal: null });
+          else throw new Error("fixture root stop unconfirmed");
+        };
+        yield* Fiber.interrupt(opening);
+        expect(Exit.hasInterrupts(yield* Fiber.await(opening))).toBe(true);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+        expect(closed).toEqual([
+          {
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            confirmed: confirmsRootExit,
+          },
+        ]);
+        expect(process.exitListenerCount).toBe(0);
+        expect((yield* getEvents).some((event) => event.type === "started")).toBe(false);
+        const snapshots: TerminalAttachStreamEvent[] = [];
+        const stop = yield* manager.observeStream(openInput(), (event) =>
+          Effect.sync(() => snapshots.push(event)),
+        );
+        stop();
+        expect(snapshots[0]).toMatchObject({ snapshot: { status: "error", pid: null } });
+        expect(
+          yield* Effect.exit(manager.write({ ...openInput(), data: "late input\n" })),
+        ).toMatchObject({
+          _tag: "Failure",
+        });
+        expect(process.writes).toEqual([]);
+      }),
+  );
+
+  it.effect("keeps a completed startup running when the open caller is later cancelled", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const opened = yield* Deferred.make<void>();
+      const keepCalling = yield* Deferred.make<void>();
+      const closed = vi.fn(() => Effect.void);
+      const caller = yield* manager.open(openInput()).pipe(
+        Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+          ...base,
+          terminalClosed: closed,
+        }),
+        Effect.tap(() => Deferred.succeed(opened, undefined)),
+        Effect.andThen(Deferred.await(keepCalling)),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(opened);
+      yield* Fiber.interrupt(caller);
+      const process = ptyAdapter.processes[0]!;
+      expect(process.killSignals).toEqual([]);
+      expect(closed).not.toHaveBeenCalled();
+      expect(yield* manager.open(openInput())).toMatchObject({
+        status: "running",
+        pid: process.pid,
+      });
+      yield* manager.write({ ...openInput(), data: "still running\n" });
+      expect(process.writes).toEqual(["still running\n"]);
+      expect(ptyAdapter.processes).toHaveLength(1);
+      process.onKill = () => process.emitExit({ exitCode: 0, signal: null });
+    }),
+  );
+
+  it.effect("publishes startup before events buffered during terminalStarted", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager();
+      const base = yield* CheckoutAdmission.CheckoutAdmission;
+      const exited = yield* Deferred.make<void>();
+      const stop = yield* manager.subscribe((event) =>
+        event.type === "exited"
+          ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(stop));
+      yield* manager.open(openInput()).pipe(
+        Effect.provideService(CheckoutAdmission.CheckoutAdmission, {
+          ...base,
+          terminalStarted: () =>
+            Effect.sync(() => {
+              const process = ptyAdapter.processes[0]!;
+              process.emitData("buffered during startup\n");
+              process.emitExit({ exitCode: 7, signal: null });
+            }),
+        }),
+      );
+      yield* Deferred.await(exited);
+      expect((yield* getEvents).map((event) => event.type)).toEqual([
+        "started",
+        "output",
+        "exited",
+      ]);
     }),
   );
 
