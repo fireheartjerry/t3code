@@ -1511,6 +1511,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   >();
   const admittedProcesses = new Map<string, PtyAdapter.PtyProcess>();
+  const capturedTerminalKeys = new Set<string>();
   const stoppedProcesses = new WeakSet<PtyAdapter.PtyProcess>();
   const notifyProcessClosed = Effect.fn("terminal.notifyProcessClosed")(function* (
     process: PtyAdapter.PtyProcess | null,
@@ -2395,6 +2396,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           threadId: session.threadId,
           terminalId: session.terminalId,
           confirmed: true,
+          ...(capturedTerminalKeys.has(toSessionKey(session.threadId, session.terminalId))
+            ? { descendantsStopped: false }
+            : {}),
         });
       }
       yield* evictInactiveSessionsIfNeeded();
@@ -2467,6 +2471,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
       const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session, (process) => {
         ptyProcess = process;
+        capturedTerminalKeys.add(toSessionKey(session.threadId, session.terminalId));
         processAdmissions.set(process, {
           admission: checkoutAdmission,
           context: admissionContext,

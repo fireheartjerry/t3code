@@ -112,6 +112,7 @@ type Terminal = {
   readonly cwd: string;
   readonly reservation: Accounting.OwnedProcessIdentity;
   process: Accounting.OwnedProcessIdentity | null;
+  descendantsUnconfirmed: boolean;
   state: "live" | "stopped" | "unknown";
 };
 
@@ -753,6 +754,7 @@ const make = Effect.gen(function* () {
           creationMarker: ownership.serverInstanceId,
         },
         process: null,
+        descendantsUnconfirmed: false,
         state: "unknown",
       };
       terminals.set(key, terminal);
@@ -831,11 +833,13 @@ const make = Effect.gen(function* () {
     const key = terminalKey(input.threadId, input.terminalId);
     const terminal = terminals.get(key);
     if (terminal === undefined) return;
-    // A captured PTY may exit before terminalStarted records its PID.
+    // A captured PTY may exit before PID registration; a retry cannot erase its uncertainty.
+    terminal.descendantsUnconfirmed ||=
+      input.descendantsStopped === false || terminal.process !== null;
     const stopped =
       input.confirmed &&
       (input.descendantsStopped === true ||
-        (terminal.process === null && input.descendantsStopped === undefined));
+        (terminal.process === null && !terminal.descendantsUnconfirmed));
     terminal.state = stopped ? "stopped" : "unknown";
     if (!stopped) terminal.activity.uncertain = true;
     yield* observeFailure(

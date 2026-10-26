@@ -743,6 +743,79 @@ it.layer(
       }),
   );
 
+  it.effect(
+    "retains captured-descendant uncertainty when a later open is cancelled before spawn",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, stateRef } = yield* createManagerWithStateRef();
+        const base = yield* CheckoutAdmission.CheckoutAdmission;
+        const starting = yield* Deferred.make<void>();
+        const requested = yield* Deferred.make<void>();
+        const locked = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const retryReady = yield* Deferred.make<void>();
+        yield* holdManagerState(stateRef, requested, locked, release).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        let attempts = 0;
+        const closed: Parameters<typeof base.terminalClosed>[0][] = [];
+        const admission = {
+          ...base,
+          terminalOpen: () =>
+            attempts++ === 0
+              ? Effect.void
+              : Deferred.succeed(requested, undefined).pipe(
+                  Effect.andThen(Deferred.await(locked)),
+                  Effect.andThen(Deferred.succeed(retryReady, undefined)),
+                ),
+          terminalStarted: () =>
+            Deferred.succeed(starting, undefined).pipe(Effect.andThen(Effect.never)),
+          terminalClosed: (input: Parameters<typeof base.terminalClosed>[0]) =>
+            Effect.sync(() => {
+              closed.push(input);
+            }),
+        };
+        const first = yield* manager
+          .open(openInput())
+          .pipe(
+            Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Deferred.await(starting);
+        const process = ptyAdapter.processes[0]!;
+        process.onKill = () => process.emitExit({ exitCode: 0, signal: null });
+        yield* Fiber.interrupt(first);
+        const retry = yield* manager
+          .open(openInput())
+          .pipe(
+            Effect.provideService(CheckoutAdmission.CheckoutAdmission, admission),
+            Effect.forkChild({ startImmediately: true }),
+          );
+        yield* Deferred.await(retryReady);
+        const cancelled = yield* Fiber.interrupt(retry).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(cancelled);
+        expect(closed).toEqual([
+          {
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            confirmed: true,
+            descendantsStopped: false,
+          },
+          {
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            confirmed: true,
+            descendantsStopped: false,
+          },
+        ]);
+        expect(ptyAdapter.processes).toHaveLength(1);
+        expect(process.killSignals).toEqual(["SIGTERM"]);
+      }),
+  );
+
   it.effect("keeps a completed startup running when the open caller is later cancelled", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

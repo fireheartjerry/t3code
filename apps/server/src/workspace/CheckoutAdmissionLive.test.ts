@@ -109,6 +109,12 @@ describe("CheckoutAdmissionLive", () => {
         descendantsStopped: false,
       });
       assert.strictEqual((yield* store.read(identity.checkoutKey))?.state, "uncertain");
+      yield* admission.terminalClosed({
+        threadId: writer.threadId,
+        terminalId: "setup",
+        confirmed: true,
+      });
+      assert.strictEqual((yield* store.read(identity.checkoutKey))?.state, "uncertain");
       assert.strictEqual(
         (yield* admission.admit(input("competing")).pipe(Effect.flip))._tag,
         "CheckoutAdmissionError",
