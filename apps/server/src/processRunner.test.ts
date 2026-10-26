@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -54,7 +55,11 @@ function makeHandle(input: {
 function makeSpawner(
   f: (
     command: ChildProcessCommand,
-  ) => Effect.Effect<ChildProcessSpawner.ChildProcessHandle, PlatformError.PlatformError>,
+  ) => Effect.Effect<
+    ChildProcessSpawner.ChildProcessHandle,
+    PlatformError.PlatformError,
+    Scope.Scope
+  >,
 ) {
   return ChildProcessSpawner.make((command) => f(asChildProcessCommand(command)));
 }
@@ -76,6 +81,72 @@ const runWith =
     );
 
 describe("runProcess", () => {
+  it.effect("registers the actual child before consuming its output", () =>
+    Effect.gen(function* () {
+      const steps: Array<string> = [];
+      const spawner = makeSpawner(() =>
+        Effect.succeed(
+          makeHandle({
+            stdout: Stream.fromEffect(
+              Effect.sync(() => {
+                steps.push("output");
+                return new TextEncoder().encode("done");
+              }),
+            ),
+          }),
+        ),
+      );
+      const result = yield* runWith(spawner)({
+        command: "fake",
+        args: [],
+        onSpawn: (pid) =>
+          Effect.sync(() => {
+            steps.push(`spawn:${pid}`);
+          }),
+      });
+      expect(result.stdout).toBe("done");
+      expect(steps).toEqual(["spawn:1", "output"]);
+    }),
+  );
+
+  it.effect("fails closed when child registration fails and closes the spawned scope", () =>
+    Effect.gen(function* () {
+      let closed = false;
+      let read = false;
+      const failure = new ProcessRunner.ProcessSpawnError({
+        command: "fake",
+        argumentCount: 0,
+        cause: "registration rejected",
+      });
+      const spawner = makeSpawner(() =>
+        Effect.acquireRelease(
+          Effect.succeed(
+            makeHandle({
+              stdout: Stream.fromEffect(
+                Effect.sync(() => {
+                  read = true;
+                  return new Uint8Array();
+                }),
+              ),
+            }),
+          ),
+          () =>
+            Effect.sync(() => {
+              closed = true;
+            }),
+        ),
+      );
+      const error = yield* runWith(spawner)({
+        command: "fake",
+        args: [],
+        onSpawn: () => Effect.fail(failure),
+      }).pipe(Effect.flip);
+      expect(error).toBe(failure);
+      expect(closed).toBe(true);
+      expect(read).toBe(false);
+    }),
+  );
+
   it.effect("resolves and escapes Windows command shims before spawning", () => {
     const spawner = makeSpawner((command) =>
       Effect.sync(() => {

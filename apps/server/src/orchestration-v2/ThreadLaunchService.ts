@@ -49,6 +49,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
@@ -194,6 +195,7 @@ function failureDetail(error: unknown): string {
 }
 
 const make = Effect.gen(function* () {
+  const checkoutAdmission = yield* CheckoutAdmission.CheckoutAdmission;
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -305,6 +307,22 @@ const make = Effect.gen(function* () {
     let setupTerminalId: string | null = null;
     let workspaceRecorded = false;
     let runReleased = false;
+    let ownershipHandle: import("@t3tools/contracts").OwnershipHandle | null = null;
+    const ownershipTerminalId = `setup-${input.commandId}`.slice(0, 128);
+    if (input.workspaceStrategy.type !== "worktree") {
+      ownershipHandle = yield* checkoutAdmission.admit({
+        commandId: CommandId.make(`${input.commandId}:ownership:setup`),
+        projectId: input.projectId,
+        threadId,
+        runId,
+        cwd:
+          input.workspaceStrategy.type === "existing_worktree"
+            ? input.workspaceStrategy.worktreePath
+            : project.workspaceRoot,
+        operation: "setup",
+        setupTerminalId: ownershipTerminalId,
+      });
+    }
     // Stop background renames before forgetting worktrees; completed renames record them again.
     let branchRename: Fiber.Fiber<unknown> | null = null;
     if (input.workspaceStrategy.type === "worktree") {
@@ -447,6 +465,15 @@ const make = Effect.gen(function* () {
         worktreePath = worktree.worktree.path;
         branch = worktree.worktree.refName;
         createdWorktreePath = worktreePath;
+        ownershipHandle = yield* checkoutAdmission.admit({
+          commandId: CommandId.make(`${input.commandId}:ownership:setup`),
+          projectId: input.projectId,
+          threadId,
+          runId,
+          cwd: worktreePath,
+          operation: "setup",
+          setupTerminalId: ownershipTerminalId,
+        });
         yield* setupTracker.update(threadId, (snapshot) => ({ ...snapshot, worktreePath, branch }));
         yield* setupTracker.stageStatus(threadId, "checkout", "done");
       }
@@ -476,12 +503,15 @@ const make = Effect.gen(function* () {
         const worktreeCwd = worktreePath;
         branchRename = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
-            git.renameBranch({
-              cwd: worktreeCwd,
-              oldBranch,
-              newBranch,
-              ...(exactName ? { exactName: true } : {}),
-            }),
+            checkoutAdmission.withCurrent(
+              ownershipHandle,
+              git.renameBranch({
+                cwd: worktreeCwd,
+                oldBranch,
+                newBranch,
+                ...(exactName ? { exactName: true } : {}),
+              }),
+            ),
           ),
           Effect.flatMap((renamed) =>
             Effect.gen(function* () {
@@ -570,6 +600,7 @@ const make = Effect.gen(function* () {
                 projectId: input.projectId,
                 projectCwd: project.workspaceRoot,
                 worktreePath,
+                preferredTerminalId: ownershipTerminalId,
                 ...(tracked
                   ? {
                       observeCompletion: {
@@ -584,7 +615,10 @@ const make = Effect.gen(function* () {
                   scripts: project.scripts,
                 },
               })
-              .pipe(Effect.mapError(mapError(input, "run-setup-script", threadId)));
+              .pipe(
+                Effect.provideService(CheckoutAdmission.ActiveCheckoutOwnership, ownershipHandle),
+                Effect.mapError(mapError(input, "run-setup-script", threadId)),
+              );
 
       let awaitAsyncSetup = Effect.void;
       if (setup.status === "started") {
@@ -652,6 +686,13 @@ const make = Effect.gen(function* () {
       yield* setupTracker.stageStatus(threadId, "agent", "done");
       yield* awaitAsyncSetup;
       yield* setupTracker.finish(threadId, "done");
+      if (runId === null && setup.status === "no-script")
+        yield* input.workspaceStrategy.type === "worktree"
+          ? checkoutAdmission.setupUncertain({ threadId, setupTerminalId: ownershipTerminalId })
+          : checkoutAdmission.setupUnstartedCompleted({
+              threadId,
+              setupTerminalId: ownershipTerminalId,
+            });
     }).pipe(
       Effect.onError((cause) =>
         Effect.gen(function* () {

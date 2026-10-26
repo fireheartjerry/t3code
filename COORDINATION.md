@@ -39,4 +39,4 @@ Touching the other side's area: keep it minimal, say so in the PR body. Contract
 
 ## Active status
 
-- `mac/server`: additive checkout ownership and verification contracts ready; server admission and evidence integration in progress.
+- `mac/server`: draft PR #4 now fixes recovery notice context and interrupted terminal startup cleanup, with deterministic regressions. Contracts PR #3 remains the dependency; native observation/process-tree proof and rollout gates remain conservative. No merge or installation performed.

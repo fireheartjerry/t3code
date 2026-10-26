@@ -1,23 +1,30 @@
 import {
-  type CommandId,
+  CommandId,
   type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  type WorkspaceExecutionRequestError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  WorkspaceExecutionApi,
+  WorkspaceExecutionAvailable,
+} from "../../../workspace/WorkspaceExecutionApi.ts";
 import {
   dispatchFailure,
   newCommandId,
   readCaller,
   readThread,
   unavailable,
+  assertFullAccess,
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
@@ -80,7 +87,129 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
+const workspaceFailure = (error: WorkspaceExecutionRequestError) =>
+  new OrchestratorMcpFailure({
+    code: error.reason === "policy" ? "capability_denied" : "orchestration_error",
+    message: error.message.slice(0, 1000),
+  });
+const workspaceApi = Effect.gen(function* () {
+  if (!(yield* WorkspaceExecutionAvailable))
+    return yield* new OrchestratorMcpFailure({
+      code: "capability_denied",
+      message: "This environment does not expose checkout ownership or verification evidence.",
+    });
+  return yield* WorkspaceExecutionApi;
+});
+const workspaceCommandId = Effect.fn("mcp.workspaceCommandId")(function* (
+  operation: string,
+  clientRequestId?: string,
+) {
+  if (clientRequestId === undefined) return yield* newCommandId();
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  return CommandId.make(`workspace:${scope.requestNamespace}:${operation}:${clientRequestId}`);
+});
+
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  inspect_thread_workspace: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return yield* (yield* workspaceApi)
+        .inspect(projection.thread.id)
+        .pipe(Effect.mapError(workspaceFailure));
+    }),
+  ),
+  wait_for_thread_workspace: writesThread((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const api = yield* workspaceApi;
+      const owner = yield* api
+        .inspect(projection.thread.id)
+        .pipe(Effect.mapError(workspaceFailure));
+      const checkoutKey = input.checkoutKey ?? owner?.identity.checkoutKey;
+      const generation = input.generation ?? owner?.handle.generation;
+      if (checkoutKey === undefined || generation === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "No active checkout owner was found. Retry the thread through its normal start flow.",
+        });
+      return yield* api
+        .wait({
+          threadId: projection.thread.id,
+          commandId: yield* workspaceCommandId("wait", input.clientRequestId),
+          checkoutKey,
+          generation,
+        })
+        .pipe(Effect.mapError(workspaceFailure));
+    }),
+  ),
+  cancel_workspace_wait: writesThread((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return yield* (yield* workspaceApi)
+        .cancelWait({
+          threadId: projection.thread.id,
+          waitId: input.waitId,
+          commandId: yield* workspaceCommandId("cancel-wait", input.clientRequestId),
+        })
+        .pipe(Effect.mapError(workspaceFailure));
+    }),
+  ),
+  verify_thread: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* assertFullAccess(
+        yield* readCaller(),
+        "Verification executes a configured command and requires full-access caller authority.",
+      );
+      const { projection } = yield* readThread(input.threadId);
+      return yield* (yield* workspaceApi)
+        .request({
+          threadId: projection.thread.id,
+          commandId: yield* workspaceCommandId("verify", input.clientRequestId),
+        })
+        .pipe(Effect.mapError(workspaceFailure));
+    }),
+  ),
+  get_thread_verification: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const api = yield* workspaceApi;
+      const record = yield* (
+        input.verificationId === undefined
+          ? api.latest(projection.thread.id)
+          : api.get(input.verificationId)
+      ).pipe(Effect.mapError(workspaceFailure));
+      if (record !== null && record.threadId !== projection.thread.id)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The verification does not belong to the selected thread.",
+        });
+      return record;
+    }),
+  ),
+  cancel_thread_verification: writesThread((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const api = yield* workspaceApi;
+      const record = yield* (
+        input.verificationId === undefined
+          ? api.latest(projection.thread.id)
+          : api.get(input.verificationId)
+      ).pipe(Effect.mapError(workspaceFailure));
+      if (record === null) return null;
+      if (record.threadId !== projection.thread.id)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The verification does not belong to the selected thread.",
+        });
+      return yield* api
+        .cancel({
+          verificationId: record.verificationId,
+          commandId: yield* workspaceCommandId("cancel-verification", input.clientRequestId),
+        })
+        .pipe(Effect.mapError(workspaceFailure));
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

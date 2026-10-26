@@ -18,6 +18,10 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  CheckoutOwnershipRecord,
+  CheckoutOwnershipWait,
+  VerificationRecord,
+  OwnershipGeneration,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -278,7 +282,80 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const workspaceTarget = { threadId: Schema.optional(ThreadId) };
+const workspaceMutation = {
+  ...workspaceTarget,
+  clientRequestId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+};
+const workspaceTool = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    Crypto.Crypto,
+  ],
+};
+const InspectCheckoutTool = Tool.make("inspect_thread_workspace", {
+  ...workspaceTool,
+  description:
+    "Read the destination thread's active checkout owner and fencing generation. This never starts work.",
+  parameters: Schema.Struct(workspaceTarget),
+  success: Schema.NullOr(CheckoutOwnershipRecord),
+}).annotate(Tool.Readonly, true);
+const WaitCheckoutTool = Tool.make("wait_for_thread_workspace", {
+  ...workspaceTool,
+  description:
+    "Queue the blocked thread for its checkout. Returns a durable wait record. Supply the inspected checkout key and generation to bind the wait; omit both to inspect at execution. Does not steal or stop an owner.",
+  parameters: Schema.Struct({
+    ...workspaceMutation,
+    checkoutKey: Schema.optional(TrimmedNonEmptyString),
+    generation: Schema.optional(OwnershipGeneration),
+  }),
+  success: CheckoutOwnershipWait,
+}).annotate(Tool.Destructive, true);
+const CancelCheckoutWaitTool = Tool.make("cancel_workspace_wait", {
+  ...workspaceTool,
+  description:
+    "Cancel a queued checkout wait for the destination thread. An admitted writer uses the normal stop flow.",
+  parameters: Schema.Struct({ ...workspaceMutation, waitId: TrimmedNonEmptyString }),
+  success: Schema.NullOr(CheckoutOwnershipWait),
+}).annotate(Tool.Destructive, true);
+const VerifyThreadTool = Tool.make("verify_thread", {
+  ...workspaceTool,
+  description:
+    "Queue the destination project's configured verification action under checkout ownership. Requires a full-access caller and destination. No arbitrary command is accepted, and agent prose cannot create passing evidence.",
+  parameters: Schema.Struct(workspaceMutation),
+  success: VerificationRecord,
+}).annotate(Tool.Destructive, true);
+const ReadVerificationTool = Tool.make("get_thread_verification", {
+  ...workspaceTool,
+  description:
+    "Read exact verification outcome, tested source identity and currentness. Reading never runs or retries a command.",
+  parameters: Schema.Struct({
+    ...workspaceTarget,
+    verificationId: Schema.optional(TrimmedNonEmptyString),
+  }),
+  success: Schema.NullOr(VerificationRecord),
+}).annotate(Tool.Readonly, true);
+const CancelVerificationTool = Tool.make("cancel_thread_verification", {
+  ...workspaceTool,
+  description:
+    "Cancel the destination thread's queued or running verification and retain its actual outcome. Omit verificationId to cancel its latest attempt.",
+  parameters: Schema.Struct({
+    ...workspaceMutation,
+    verificationId: Schema.optional(TrimmedNonEmptyString),
+  }),
+  success: Schema.NullOr(VerificationRecord),
+}).annotate(Tool.Destructive, true);
+
 export const ThreadToolkit = Toolkit.make(
+  InspectCheckoutTool,
+  WaitCheckoutTool,
+  CancelCheckoutWaitTool,
+  VerifyThreadTool,
+  ReadVerificationTool,
+  CancelVerificationTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,

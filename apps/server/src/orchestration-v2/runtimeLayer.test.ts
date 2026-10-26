@@ -85,6 +85,18 @@ import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as WorkspaceExecutionApi from "../workspace/WorkspaceExecutionApi.ts";
+import * as CheckoutAdmission from "../workspace/CheckoutAdmission.ts";
+import * as CheckoutAdmissionLive from "../workspace/CheckoutAdmissionLive.ts";
+import * as CheckoutOwnership from "../workspace/CheckoutOwnershipService.ts";
+import * as VerificationService from "../verification/VerificationService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as CloudManagedEndpoint from "../cloud/ManagedEndpointRuntime.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 const layerPlatformTest = Layer.merge(
   NodeServices.layer,
@@ -6867,4 +6879,66 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
         }),
     );
   },
+);
+
+it.effect(
+  "production builds live checkout/evidence services while the core keeps legacy defaults",
+  () =>
+    Effect.gen(function* () {
+      const admission = yield* CheckoutAdmission.CheckoutAdmission;
+      const live = yield* CheckoutAdmissionLive.CheckoutAdmissionLive;
+      const ownership = yield* CheckoutOwnership.CheckoutOwnershipService;
+      const verification = yield* VerificationService.VerificationService;
+      assert.strictEqual(admission, live.admission);
+      assert.strictEqual(verification.serverInstanceId, ownership.serverInstanceId);
+      assert.isTrue(yield* WorkspaceExecutionApi.WorkspaceExecutionAvailable);
+      const api = yield* WorkspaceExecutionApi.WorkspaceExecutionApi;
+      assert.isNull(yield* api.get("unknown-verification"));
+    }).pipe(
+      Effect.provide(
+        RuntimeLayer.layerProduction.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
+              Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
+              Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({}),
+              Layer.mock(WorkspacePaths.WorkspacePaths)({
+                normalizeWorkspaceRoot: (cwd) => Effect.succeed(cwd),
+              }),
+              Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ stream: Stream.empty }),
+              Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({
+                getProviders: Effect.succeed([]),
+                streamChanges: Stream.empty,
+              }),
+              Layer.mock(CloudManagedEndpoint.CloudManagedEndpointRuntime)({
+                inspectConnector: Effect.succeed(null),
+                readinessChanged: Stream.empty,
+                recoveryRequests: Stream.empty,
+                tunnelConnected: Stream.empty,
+              }),
+              Layer.succeed(ServerSecretStore.ServerSecretStore, {
+                get: () => Effect.succeedNone,
+                set: () => Effect.void,
+                create: () => Effect.void,
+                getOrCreateRandom: () => Effect.succeed(new Uint8Array(32)),
+                remove: () => Effect.void,
+              }),
+              TextGeneration.layer,
+              GitVcsDriver.layer.pipe(Layer.provide(VcsProcess.layer)),
+            ),
+          ),
+          Layer.provide(McpSessionRegistryTestkit.layer),
+          Layer.provide(McpProviderSessions.layer),
+          Layer.provide(ProjectStore.layer),
+          Layer.provide(SqlitePersistence.layerMemory),
+          Layer.provide(layerCheckpointStoreTest),
+          Layer.provide(layerServerConfig),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(layerTestProviderInstanceRegistry),
+          Layer.provide(layerGitWorkflowTest),
+          Layer.provide(layerPlatformTest),
+        ),
+      ),
+    ),
 );
